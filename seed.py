@@ -20,6 +20,8 @@ def _create_customer(index: int, password: str) -> Tuple[User, Customer]:
     email = f"customer{index:03d}@seed.local"
     existing = User.query.filter_by(email=email).first()
     if existing and existing.customer:
+        existing.set_password(password)
+        db.session.add(existing)
         return existing, existing.customer
 
     user = User(
@@ -50,6 +52,8 @@ def _create_merchant(index: int, password: str) -> Tuple[User, Merchant]:
     email = f"merchant{index:03d}@seed.local"
     existing = User.query.filter_by(email=email).first()
     if existing and existing.merchant:
+        existing.set_password(password)
+        db.session.add(existing)
         return existing, existing.merchant
 
     user = User(
@@ -95,16 +99,19 @@ def run_seed(customers: int, merchants: int, password: str) -> None:
 
         created_customers = 0
         created_merchants = 0
+        seeded_accounts = []
 
         for i in range(1, customers + 1):
             before = User.query.filter_by(email=f"customer{i:03d}@seed.local").first()
-            _create_customer(i, password)
+            user, customer = _create_customer(i, password)
+            seeded_accounts.append(("customer", user.email, password, customer.customer_code))
             if before is None:
                 created_customers += 1
 
         for i in range(1, merchants + 1):
             before = User.query.filter_by(email=f"merchant{i:03d}@seed.local").first()
-            _create_merchant(i, password)
+            user, _merchant = _create_merchant(i, password)
+            seeded_accounts.append(("merchant", user.email, password, "-"))
             if before is None:
                 created_merchants += 1
 
@@ -120,6 +127,13 @@ def run_seed(customers: int, merchants: int, password: str) -> None:
         print(f"Total merchants in DB: {total_merchants}")
         print(f"Default seed password: {password}")
         print("Tip: customer codes are generated automatically and can be regenerated via POST /customers/me/regenerate-code")
+
+        print("\nSeeded account credentials")
+        print("=" * 90)
+        print(f"{'ROLE':<10} {'EMAIL':<35} {'PASSWORD':<20} {'CUSTOMER_CODE':<15}")
+        print("-" * 90)
+        for role, email, pwd, code in seeded_accounts:
+            print(f"{role:<10} {email:<35} {pwd:<20} {code:<15}")
 
 
 def _args() -> argparse.Namespace:
