@@ -1,6 +1,6 @@
 """
 Flask API Routes
-Provides Flask-compatible API endpoints that mirror the FastAPI routes
+Provides active API endpoints for the Flask runtime
 """
 from flask import Blueprint, jsonify, request
 from functools import wraps
@@ -26,7 +26,7 @@ def get_current_user_flask():
     try:
         payload = verify_token(token)
         from app.models import User
-        return User.query.get(payload.get('sub'))
+        return db.session.get(User, payload.get('sub'))
     except Exception:
         return None
 
@@ -74,7 +74,7 @@ def require_role(*roles):
 @api.route('/auth/login', methods=['POST'])
 def login():
     """User login endpoint"""
-    data = request.get_json()
+    data = request.get_json() or {}
     email = data.get('email')
     password = data.get('password')
     national_id = data.get('national_id')
@@ -124,20 +124,30 @@ def login():
 @api.route('/auth/register', methods=['POST'])
 def register():
     """User registration endpoint"""
-    data = request.get_json()
+    data = request.get_json() or {}
     
     try:
-        user = AuthService.register(
-            email=data.get('email'),
-            password=data.get('password'),
-            full_name=data.get('full_name'),
-            phone=data.get('phone'),
-            national_id=data.get('national_id'),
-            role=data.get('role', 'customer')
-        )
+        role = data.get('role', 'customer')
+        if role == 'merchant':
+            user, _merchant = AuthService.register_merchant(
+                email=data.get('email'),
+                password=data.get('password'),
+                full_name=data.get('full_name'),
+                shop_name=data.get('shop_name') or data.get('full_name') or 'Merchant Shop',
+                phone=data.get('phone'),
+                national_id=data.get('national_id')
+            )
+        else:
+            user, _customer = AuthService.register_customer(
+                email=data.get('email'),
+                password=data.get('password'),
+                full_name=data.get('full_name'),
+                phone=data.get('phone'),
+                national_id=data.get('national_id')
+            )
         
         # Generate token
-        token = create_access_token(user.id)
+        token = create_access_token(user.id, email=user.email, role=user.role)
         
         return jsonify({
             "success": True,
@@ -267,7 +277,7 @@ def customer_transactions(user):
         "data": [
             {
                 "id": txn.id,
-                "amount": float(txn.amount),
+                "amount": float(txn.total_amount),
                 "status": txn.status,
                 "merchant_name": txn.merchant.shop_name if txn.merchant else "Unknown",
                 "created_at": txn.created_at.isoformat() if txn.created_at else None
@@ -514,17 +524,17 @@ def customer_upcoming_payments(user):
         
         payments = Payment.query.filter(
             Payment.transaction_id.in_(transaction_ids),
-            Payment.due_date >= datetime.utcnow(),
-            Payment.due_date <= future_date,
+            Payment.payment_date >= datetime.utcnow(),
+            Payment.payment_date <= future_date,
             Payment.status.in_(['pending', 'overdue'])
-        ).order_by(Payment.due_date.asc()).limit(20).all()
+        ).order_by(Payment.payment_date.asc()).limit(20).all()
         
         result = []
         for p in payments:
             result.append({
                 "id": p.id,
                 "amount": float(p.amount),
-                "due_date": p.due_date.isoformat() if p.due_date else None,
+                "due_date": p.payment_date.isoformat() if p.payment_date else None,
                 "status": p.status,
                 "transaction_id": p.transaction_id
             })
@@ -558,21 +568,21 @@ def customer_repayment_plans(user):
     
     result = []
     for t in transactions:
-        payments = Payment.query.filter_by(transaction_id=t.id).order_by(Payment.due_date.asc()).all()
+        payments = Payment.query.filter_by(transaction_id=t.id).order_by(Payment.payment_date.asc()).all()
         
         payment_schedule = []
         for p in payments:
             payment_schedule.append({
                 "id": p.id,
                 "amount": float(p.amount),
-                "due_date": p.due_date.isoformat() if p.due_date else None,
+                "due_date": p.payment_date.isoformat() if p.payment_date else None,
                 "status": p.status
             })
         
         result.append({
             "transaction_id": t.id,
             "total_amount": float(t.total_amount),
-            "remaining_balance": float(t.remaining_balance or t.total_amount),
+            "remaining_balance": float(t.remaining_amount),
             "status": t.status,
             "payment_schedule": payment_schedule,
             "created_at": t.created_at.isoformat() if t.created_at else None
@@ -681,7 +691,7 @@ def merchant_dashboard(user):
     # Get statistics
     total_transactions = Transaction.query.filter_by(merchant_id=merchant.id).count()
     
-    total_sales = db.session.query(func.sum(Transaction.amount)).filter(
+    total_sales = db.session.query(func.sum(Transaction.total_amount)).filter(
         Transaction.merchant_id == merchant.id
     ).scalar() or 0
     
@@ -726,12 +736,12 @@ def merchant_transactions(user):
     
     result = []
     for t in transactions:
-        customer = Customer.query.get(t.customer_id)
-        customer_user = User.query.get(customer.user_id) if customer else None
+        customer = db.session.get(Customer, t.customer_id)
+        customer_user = db.session.get(User, customer.user_id) if customer else None
         result.append({
             "id": t.id,
             "transaction_number": t.transaction_number,
-            "amount": float(t.amount),
+            "amount": float(t.total_amount),
             "remaining_amount": float(t.remaining_amount),
             "status": t.status,
             "customer_name": customer_user.full_name if customer_user else "Unknown",
@@ -768,7 +778,7 @@ def merchant_settlements(user):
             "net_amount": float(s.net_amount),
             "status": s.status,
             "created_at": s.created_at.isoformat() if s.created_at else None,
-            "settled_at": s.settled_at.isoformat() if s.settled_at else None
+            "settled_at": s.completed_at.isoformat() if s.completed_at else None
         })
     
     return jsonify({
@@ -801,8 +811,8 @@ def merchant_transactions_paginated(user):
     
     result = []
     for t in transactions:
-        customer = Customer.query.get(t.customer_id)
-        customer_user = User.query.get(customer.user_id) if customer else None
+        customer = db.session.get(Customer, t.customer_id)
+        customer_user = db.session.get(User, customer.user_id) if customer else None
         
         result.append({
             "id": t.id,
@@ -862,7 +872,7 @@ def merchant_settlements_filtered(user):
             "net_amount": float(s.net_amount),
             "status": s.status,
             "created_at": s.created_at.isoformat() if s.created_at else None,
-            "settled_at": s.settled_at.isoformat() if s.settled_at else None
+            "settled_at": s.completed_at.isoformat() if s.completed_at else None
         })
     
     return jsonify({
@@ -924,7 +934,7 @@ def lookup_customer(user, customer_identifier):
     if len(customer_identifier) == 8 and customer_identifier.isalnum():
         customer = Customer.query.filter_by(customer_code=customer_identifier.upper()).first()
         if customer:
-            customer_user = User.query.get(customer.user_id)
+            customer_user = db.session.get(User, customer.user_id)
     
     # If not found, try by phone or email
     if not customer:
@@ -973,15 +983,15 @@ def merchant_purchase_requests_list(user):
     
     result = []
     for r in requests:
-        customer = Customer.query.get(r.customer_id)
-        customer_user = User.query.get(customer.user_id) if customer else None
+        customer = db.session.get(Customer, r.customer_id)
+        customer_user = db.session.get(User, customer.user_id) if customer else None
         
         result.append({
             "id": r.id,
-            "request_number": r.request_number,
+            "request_number": r.reference_number,
             "customer_name": customer_user.full_name if customer_user else "Unknown",
-            "amount": float(r.amount),
-            "description": r.description,
+            "amount": float(r.total_amount),
+            "description": r.product_description,
             "status": r.status,
             "expires_at": r.expires_at.isoformat() if r.expires_at else None,
             "created_at": r.created_at.isoformat() if r.created_at else None
@@ -1034,11 +1044,13 @@ def create_purchase_request(user):
     
     # Create purchase request
     pr = PurchaseRequest(
-        request_number=f"PR-{uuid.uuid4().hex[:8].upper()}",
         merchant_id=merchant.id,
         customer_id=customer.id,
-        amount=amount,
-        description=data.get('description', ''),
+        product_name=data.get('product_name') or 'Purchase',
+        product_description=data.get('description', ''),
+        quantity=int(data.get('quantity', 1)),
+        unit_price=amount,
+        total_amount=amount,
         status='pending',
         expires_at=datetime.utcnow() + timedelta(hours=Config.PURCHASE_REQUEST_EXPIRY_HOURS)
     )
@@ -1050,8 +1062,8 @@ def create_purchase_request(user):
         "success": True,
         "data": {
             "id": pr.id,
-            "request_number": pr.request_number,
-            "amount": float(pr.amount),
+            "request_number": pr.reference_number,
+            "amount": float(pr.total_amount),
             "status": pr.status,
             "customer_name": customer_user.full_name,
             "expires_at": pr.expires_at.isoformat()
@@ -1090,11 +1102,11 @@ def send_purchase_request(user):
         if not customer_id:
             return jsonify({"success": False, "message": "Customer not found"}), 404
     
-    customer = Customer.query.get(customer_id)
+    customer = db.session.get(Customer, customer_id)
     if not customer:
         return jsonify({"success": False, "message": "Customer not found"}), 404
     
-    customer_user = User.query.get(customer.user_id)
+    customer_user = db.session.get(User, customer.user_id)
     amount = float(data.get('amount', 0))
     
     # Check customer balance
@@ -1106,11 +1118,13 @@ def send_purchase_request(user):
     
     # Create purchase request
     pr = PurchaseRequest(
-        request_number=f"PR-{uuid.uuid4().hex[:8].upper()}",
         merchant_id=merchant.id,
         customer_id=customer.id,
-        amount=amount,
-        description=data.get('description', ''),
+        product_name=data.get('product_name') or 'Purchase',
+        product_description=data.get('description', ''),
+        quantity=int(data.get('quantity', 1)),
+        unit_price=amount,
+        total_amount=amount,
         status='pending',
         expires_at=datetime.utcnow() + timedelta(hours=24)  # 24 hours expiry
     )
@@ -1122,8 +1136,8 @@ def send_purchase_request(user):
         "success": True,
         "data": {
             "id": pr.id,
-            "request_number": pr.request_number,
-            "amount": float(pr.amount),
+            "request_number": pr.reference_number,
+            "amount": float(pr.total_amount),
             "status": pr.status,
             "customer_name": customer_user.full_name,
             "customer_phone": customer_user.phone,
@@ -1154,12 +1168,12 @@ def get_pending_requests(user):
     
     result = []
     for r in requests:
-        merchant = Merchant.query.get(r.merchant_id)
+        merchant = db.session.get(Merchant, r.merchant_id)
         result.append({
             "id": r.id,
-            "request_number": r.request_number,
-            "amount": float(r.amount),
-            "description": r.description,
+            "request_number": r.reference_number,
+            "amount": float(r.total_amount),
+            "description": r.product_description,
             "merchant_name": merchant.shop_name if merchant else "Unknown",
             "expires_at": r.expires_at.isoformat() if r.expires_at else None,
             "created_at": r.created_at.isoformat() if r.created_at else None
@@ -1184,7 +1198,7 @@ def accept_purchase_request(user, request_id):
     if not customer:
         return jsonify({"success": False, "message": "Customer not found"}), 404
     
-    pr = PurchaseRequest.query.get(request_id)
+    pr = db.session.get(PurchaseRequest, request_id)
     if not pr or pr.customer_id != customer.id:
         return jsonify({"success": False, "message": "Request not found"}), 404
     
@@ -1194,14 +1208,14 @@ def accept_purchase_request(user, request_id):
     if pr.expires_at < datetime.utcnow():
         return jsonify({"success": False, "message": "Request has expired"}), 400
     
-    if pr.amount > customer.available_balance:
+    if pr.total_amount > customer.available_balance:
         return jsonify({"success": False, "message": "Insufficient balance"}), 400
     
     # Update purchase request
     pr.status = 'accepted'
     
     # Deduct from customer balance
-    customer.available_balance -= pr.amount
+    customer.available_balance -= pr.total_amount
     
     # Create transaction
     transaction = Transaction(
@@ -1209,21 +1223,22 @@ def accept_purchase_request(user, request_id):
         customer_id=customer.id,
         merchant_id=pr.merchant_id,
         purchase_request_id=pr.id,
-        amount=pr.amount,
-        remaining_amount=pr.amount,
+        total_amount=pr.total_amount,
+        remaining_amount=pr.total_amount,
+        commission_rate=Config.PLATFORM_COMMISSION_RATE,
         status='active'
     )
     db.session.add(transaction)
     db.session.flush()
     
     # Create settlement for merchant
-    commission = pr.amount * Config.PLATFORM_COMMISSION_RATE
+    commission = pr.total_amount * Config.PLATFORM_COMMISSION_RATE
     settlement = Settlement(
         merchant_id=pr.merchant_id,
         transaction_id=transaction.id,
-        gross_amount=pr.amount,
+        gross_amount=pr.total_amount,
         commission_amount=commission,
-        net_amount=pr.amount - commission,
+        net_amount=pr.total_amount - commission,
         status='pending'
     )
     db.session.add(settlement)
@@ -1235,7 +1250,7 @@ def accept_purchase_request(user, request_id):
         "data": {
             "transaction_id": transaction.id,
             "transaction_number": transaction.transaction_number,
-            "amount": float(transaction.amount),
+            "amount": float(transaction.total_amount),
             "new_balance": float(customer.available_balance)
         },
         "message": "Purchase request accepted"
@@ -1252,7 +1267,7 @@ def reject_purchase_request(user, request_id):
     if not customer:
         return jsonify({"success": False, "message": "Customer not found"}), 404
     
-    pr = PurchaseRequest.query.get(request_id)
+    pr = db.session.get(PurchaseRequest, request_id)
     if not pr or pr.customer_id != customer.id:
         return jsonify({"success": False, "message": "Request not found"}), 404
     
@@ -1283,7 +1298,7 @@ def make_payment(user, transaction_id):
     if not customer:
         return jsonify({"success": False, "message": "Customer not found"}), 404
     
-    transaction = Transaction.query.get(transaction_id)
+    transaction = db.session.get(Transaction, transaction_id)
     if not transaction or transaction.customer_id != customer.id:
         return jsonify({"success": False, "message": "Transaction not found"}), 404
     
@@ -1301,12 +1316,13 @@ def make_payment(user, transaction_id):
     
     # Create payment
     payment = Payment(
-        payment_number=f"PAY-{uuid.uuid4().hex[:8].upper()}",
+        payment_reference=f"PAY-{uuid.uuid4().hex[:8].upper()}",
         transaction_id=transaction.id,
+        customer_id=customer.id,
         amount=amount,
         payment_method=data.get('payment_method', 'card'),
         status='completed',
-        paid_at=datetime.utcnow()
+        payment_date=datetime.utcnow()
     )
     db.session.add(payment)
     
@@ -1325,7 +1341,7 @@ def make_payment(user, transaction_id):
         "success": True,
         "data": {
             "payment_id": payment.id,
-            "payment_number": payment.payment_number,
+            "payment_number": payment.payment_reference,
             "amount_paid": float(payment.amount),
             "remaining_amount": float(transaction.remaining_amount),
             "transaction_status": transaction.status,

@@ -52,14 +52,212 @@ def create_flask_app() -> Flask:
 
 def register_flask_routes(app: Flask):
     """Register Flask-specific routes (frontend, admin, etc.)"""
+
+    @app.route('/admin/self-test', methods=['GET'])
+    @app.route('/admin/self-test/', methods=['GET'])
+    def admin_self_test_page():
+        """One-click backend self-test dashboard."""
+        return """
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Backend Self Test</title>
+    <style>
+        :root {
+            --bg: #f5f7fb;
+            --card: #ffffff;
+            --ink: #1f2a37;
+            --ok: #0f9d58;
+            --bad: #c62828;
+            --muted: #6b7280;
+            --accent: #0b67c2;
+        }
+        body {
+            margin: 0;
+            font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(160deg, #eef5ff 0%, var(--bg) 50%, #f8f9fc 100%);
+            color: var(--ink);
+        }
+        .wrap {
+            max-width: 1080px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+        .panel {
+            background: var(--card);
+            border-radius: 12px;
+            box-shadow: 0 8px 24px rgba(16, 24, 40, 0.08);
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        h1 { margin: 0 0 0.75rem 0; font-size: 1.5rem; }
+        .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+        button {
+            border: 0;
+            background: var(--accent);
+            color: #fff;
+            font-weight: 600;
+            padding: 0.7rem 1rem;
+            border-radius: 10px;
+            cursor: pointer;
+        }
+        button:disabled { opacity: 0.55; cursor: not-allowed; }
+        .meta { color: var(--muted); font-size: 0.92rem; }
+        .ok { color: var(--ok); font-weight: 700; }
+        .bad { color: var(--bad); font-weight: 700; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.92rem;
+            background: #fff;
+        }
+        th, td {
+            text-align: left;
+            border-bottom: 1px solid #e5e7eb;
+            padding: 0.55rem;
+            vertical-align: top;
+        }
+        th { background: #f9fafb; }
+        .tag {
+            display: inline-block;
+            padding: 0.1rem 0.45rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            background: #edf2ff;
+            color: #1f4e96;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <div class="panel">
+            <h1>Backend Self Test</h1>
+            <div class="row">
+                <button id="runBtn" type="button">Run Full Endpoint + Function Test</button>
+                <span id="status" class="meta">Idle</span>
+            </div>
+            <p class="meta">This runs all configured endpoint and service-function checks automatically and returns a per-check status report.</p>
+        </div>
+
+        <div class="panel">
+            <div id="summary" class="meta">No run yet.</div>
+        </div>
+
+        <div class="panel" style="overflow:auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Kind</th>
+                        <th>Name</th>
+                        <th>Status</th>
+                        <th>HTTP</th>
+                        <th>Duration (ms)</th>
+                        <th>Message</th>
+                    </tr>
+                </thead>
+                <tbody id="resultsBody">
+                    <tr><td colspan="6" class="meta">Run the test to populate results.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        const runBtn = document.getElementById('runBtn');
+        const status = document.getElementById('status');
+        const summary = document.getElementById('summary');
+        const resultsBody = document.getElementById('resultsBody');
+
+        function esc(v) {
+            return String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        function setRows(checks) {
+            if (!checks || checks.length === 0) {
+                resultsBody.innerHTML = '<tr><td colspan="6" class="meta">No checks returned.</td></tr>';
+                return;
+            }
+            resultsBody.innerHTML = checks.map(item => {
+                const okClass = item.ok ? 'ok' : 'bad';
+                const okText = item.ok ? 'PASS' : 'FAIL';
+                return `
+                    <tr>
+                        <td><span class="tag">${esc(item.kind)}</span></td>
+                        <td>${esc(item.name)}</td>
+                        <td class="${okClass}">${okText}</td>
+                        <td>${esc(item.status_code ?? '-')}</td>
+                        <td>${esc(item.duration_ms ?? '-')}</td>
+                        <td>${esc(item.message ?? '')}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function runTests() {
+            runBtn.disabled = true;
+            status.textContent = 'Running...';
+            summary.textContent = 'Executing all checks...';
+            try {
+                const resp = await fetch('/admin/self-test/run', { method: 'POST' });
+                const data = await resp.json();
+                const s = data.summary || {};
+                const cls = data.success ? 'ok' : 'bad';
+                summary.innerHTML = `<span class="${cls}">${data.success ? 'PASS' : 'FAIL'}</span> ` +
+                    `Total: ${esc(s.total)} | Passed: ${esc(s.passed)} | Failed: ${esc(s.failed)} | Duration: ${esc(s.duration_ms)} ms`;
+                setRows(data.checks || []);
+                status.textContent = 'Done';
+            } catch (err) {
+                summary.innerHTML = '<span class="bad">FAIL</span> Could not run self-test.';
+                status.textContent = 'Error';
+            } finally {
+                runBtn.disabled = false;
+            }
+        }
+
+        runBtn.addEventListener('click', runTests);
+    </script>
+</body>
+</html>
+        """
+
+    @app.route('/admin/self-test/run', methods=['GET', 'POST'])
+    @app.route('/admin/self-test/run/', methods=['GET', 'POST'])
+    def admin_self_test_run():
+        """Run endpoint/function self-test and return JSON report."""
+        from app.self_test_runner import run_full_backend_self_test
+
+        report = run_full_backend_self_test(app)
+        return jsonify(report)
+
+    if not Config.SERVE_WEB_APP:
+        @app.route('/')
+        def api_root():
+            """API root endpoint when web hosting is disabled"""
+            return jsonify({
+                "success": True,
+                "data": {
+                    "name": Config.APP_NAME,
+                    "version": Config.APP_VERSION,
+                    "mode": "api"
+                },
+                "message": "Bareeq Alysr Flask API"
+            })
     
     @app.route('/health')
     def flask_health():
         """Flask health check endpoint"""
         return jsonify({
-            "status": "healthy",
-            "framework": "flask",
-            "database": "connected"
+            "success": True,
+            "data": {
+                "status": "healthy",
+                "framework": "flask",
+                "version": Config.APP_VERSION,
+                "database": "connected"
+            },
+            "message": "Service is healthy"
         })
 
     @app.route('/config')
@@ -96,22 +294,23 @@ def register_flask_routes(app: Flask):
             "files": files[:20]  # Limit to first 20 files
         })
     
-    # Catch-all route for frontend (must be last)
-    @app.route('/', defaults={'path': ''})
-    @app.route('/<path:path>')
-    def serve_frontend(path):
-        """Serve the React frontend or static files"""
-        # API routes are handled by the blueprint, don't catch them here
-        if path.startswith(('auth/', 'customers/', 'merchants/', 'admin/')):
-            # Let the API blueprint handle these
-            return jsonify({"error": "Not Found"}), 404
-        
-        # Serve static file if it exists
-        if path and os.path.exists(os.path.join(app.static_folder, path)):
-            return send_from_directory(app.static_folder, path)
-        
-        # Otherwise serve index.html for SPA routing
-        return send_from_directory(app.static_folder, 'index.html')
+    if Config.SERVE_WEB_APP:
+        # Catch-all route for optional web app hosting (must be last)
+        @app.route('/', defaults={'path': ''})
+        @app.route('/<path:path>')
+        def serve_frontend(path):
+            """Serve static frontend files when web hosting is enabled"""
+            # API routes are handled by the blueprint, don't catch them here
+            if path.startswith(('auth/', 'customers/', 'merchants/', 'admin/')):
+                # Let the API blueprint handle these
+                return jsonify({"error": "Not Found"}), 404
+
+            # Serve static file if it exists
+            if path and os.path.exists(os.path.join(app.static_folder, path)):
+                return send_from_directory(app.static_folder, path)
+
+            # Otherwise serve index.html for SPA routing
+            return send_from_directory(app.static_folder, 'index.html')
     
     @app.route('/admin/stats')
     def admin_stats():

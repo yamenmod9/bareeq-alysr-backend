@@ -2,17 +2,25 @@
 
 Flask API backend for Bareeq Alysr.
 
+## Runtime Architecture
+
+- Active runtime: Flask (`app/flask_app.py`)
+- Local entrypoint: `run.py`
+- Deployment entrypoint: `wsgi.py`
+- Legacy FastAPI code is archived under `app/legacy_fastapi/`
+
 ## Run locally
 
 1. Create and activate a virtual environment.
-2. Install dependencies:
+2. Use Python 3.12 (recommended for deployment parity and dependency compatibility).
+3. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Configure environment variables using .env.example.
-4. Start the server:
+4. Configure environment variables using .env.example.
+5. Start the server:
 
 ```bash
 python run.py
@@ -40,6 +48,10 @@ from wsgi import application
 ## Health check
 
 - GET /health
+
+## Cutover and deployment runbook
+
+- docs/cutover_runbook.md
 
 ## Test credentials (development only)
 

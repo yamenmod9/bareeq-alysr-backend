@@ -1,6 +1,6 @@
 """
 Application Configuration
-Supports both FastAPI and Flask settings
+Flask runtime settings
 """
 import os
 from datetime import timedelta
@@ -16,6 +16,7 @@ class Config:
     APP_NAME = "Bareeq Al-Yusr"
     APP_VERSION = "1.0.0"
     DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+    SERVE_WEB_APP = os.getenv("SERVE_WEB_APP", "false").lower() == "true"
     
     # Database (Flask-SQLAlchemy)
     SQLALCHEMY_DATABASE_URI = os.getenv(

@@ -1,6 +1,6 @@
 """
 Flask-SQLAlchemy Database Setup
-Shared between Flask and FastAPI
+Shared database helpers for Flask runtime
 """
 from contextlib import contextmanager
 from flask_sqlalchemy import SQLAlchemy
@@ -33,7 +33,7 @@ def get_flask_app():
 def app_context():
     """
     Context manager for Flask app context.
-    Use this in FastAPI routes to access Flask-SQLAlchemy.
+    Use this helper in services/scripts when a Flask app context is required.
     
     Example:
         with app_context():
@@ -48,8 +48,7 @@ def app_context():
 
 def get_db_session():
     """
-    Get database session for use in FastAPI
-    This allows FastAPI to use Flask-SQLAlchemy models
+    Get active SQLAlchemy session.
     """
     return db.session
 

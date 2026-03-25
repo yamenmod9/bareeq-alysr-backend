@@ -6,9 +6,6 @@ from datetime import datetime
 from typing import Any, Optional, List, TypeVar, Generic
 from math import ceil
 
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-
 T = TypeVar('T')
 
 
@@ -41,7 +38,7 @@ def error_response(
     error: str = "Error",
     details: Optional[dict] = None,
     status_code: int = 400
-) -> JSONResponse:
+) -> tuple[dict, int]:
     """
     Create a standardized error response
     
@@ -52,7 +49,7 @@ def error_response(
         status_code: HTTP status code
     
     Returns:
-        JSONResponse with error data
+        Tuple of (error payload, HTTP status code)
     """
     content = {
         "success": False,
@@ -61,10 +58,7 @@ def error_response(
         "details": details,
         "timestamp": datetime.utcnow().isoformat()
     }
-    return JSONResponse(
-        status_code=status_code,
-        content=content
-    )
+    return content, status_code
 
 
 def paginate(
@@ -116,8 +110,8 @@ class APIException(Exception):
         self.details = details
         super().__init__(self.message)
     
-    def to_response(self) -> JSONResponse:
-        """Convert to JSONResponse"""
+    def to_response(self) -> tuple[dict, int]:
+        """Convert to framework-agnostic response tuple"""
         return error_response(
             message=self.message,
             error=self.error_code,

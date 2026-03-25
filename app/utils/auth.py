@@ -1,25 +1,30 @@
 """
 JWT Authentication Utilities
-Handles token creation, verification, and FastAPI dependencies
+Handles token creation and verification for Flask API runtime
 """
 from datetime import datetime, timedelta
 from typing import Optional, Callable
 from functools import wraps
+from inspect import iscoroutinefunction
 
 import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.config import Config
 
-# Security scheme for FastAPI
-security = HTTPBearer()
+
+class AuthError(Exception):
+    """Framework-agnostic auth exception."""
+
+    def __init__(self, message: str, status_code: int = 401):
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)
 
 
 def create_access_token(
     user_id: int,
-    email: str,
-    role: str,
+    email: Optional[str] = None,
+    role: Optional[str] = None,
     expires_delta: Optional[timedelta] = None
 ) -> str:
     """
@@ -27,8 +32,8 @@ def create_access_token(
     
     Args:
         user_id: User's database ID
-        email: User's email
-        role: User's role (customer/merchant/admin)
+        email: User's email (optional)
+        role: User's role (customer/merchant/admin, optional)
         expires_delta: Custom expiration time (optional)
     
     Returns:
@@ -42,12 +47,15 @@ def create_access_token(
     
     payload = {
         "sub": str(user_id),
-        "email": email,
-        "role": role,
         "iat": now,
         "exp": expire,
         "type": "access"
     }
+
+    if email is not None:
+        payload["email"] = email
+    if role is not None:
+        payload["role"] = role
     
     token = jwt.encode(
         payload,
@@ -69,7 +77,7 @@ def verify_token(token: str) -> dict:
         Decoded token payload
     
     Raises:
-        HTTPException: If token is invalid or expired
+        AuthError: If token is invalid or expired
     """
     try:
         payload = jwt.decode(
@@ -79,76 +87,72 @@ def verify_token(token: str) -> dict:
         )
         return payload
     except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
+        raise AuthError("Token has expired", status_code=401)
     except jwt.InvalidTokenError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}",
-            headers={"WWW-Authenticate": "Bearer"}
-        )
+        raise AuthError(f"Invalid token: {str(e)}", status_code=401)
 
 
-async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
-) -> dict:
+def get_current_user(token: str) -> dict:
     """
-    FastAPI dependency to get current authenticated user
+    Resolve current user payload from a bearer token string.
     
     Args:
-        credentials: Bearer token from request header
+        token: Encoded JWT token
     
     Returns:
         User data from token payload
     """
-    token = credentials.credentials
     payload = verify_token(token)
     
     return {
         "user_id": int(payload["sub"]),
-        "email": payload["email"],
-        "role": payload["role"]
+        "email": payload.get("email"),
+        "role": payload.get("role")
     }
 
 
 def require_role(*allowed_roles: str) -> Callable:
     """
-    Decorator/dependency factory for role-based access control
+    Decorator factory for role-based access control.
     
     Args:
         *allowed_roles: Roles allowed to access the endpoint
     
-    Returns:
-        FastAPI dependency function
-    
-    Usage:
-        @router.get("/admin-only")
-        async def admin_endpoint(user = Depends(require_role("admin"))):
-            pass
+    The decorated callable must receive `token_payload` in kwargs.
     """
-    async def role_checker(
-        credentials: HTTPAuthorizationCredentials = Depends(security)
-    ) -> dict:
-        token = credentials.credentials
-        payload = verify_token(token)
-        user_role = payload.get("role")
-        
-        if user_role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access denied. Required role: {', '.join(allowed_roles)}"
-            )
-        
-        return {
-            "user_id": int(payload["sub"]),
-            "email": payload["email"],
-            "role": user_role
-        }
-    
-    return role_checker
+    def decorator(func):
+        if iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                payload = kwargs.get("token_payload")
+                if not payload:
+                    raise AuthError("Authentication required", status_code=401)
+                role = payload.get("role")
+                if role not in allowed_roles:
+                    raise AuthError(
+                        f"Access denied. Required role: {', '.join(allowed_roles)}",
+                        status_code=403,
+                    )
+                return await func(*args, **kwargs)
+
+            return async_wrapper
+
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            payload = kwargs.get("token_payload")
+            if not payload:
+                raise AuthError("Authentication required", status_code=401)
+            role = payload.get("role")
+            if role not in allowed_roles:
+                raise AuthError(
+                    f"Access denied. Required role: {', '.join(allowed_roles)}",
+                    status_code=403,
+                )
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 # Convenience dependencies for common role checks
@@ -186,11 +190,21 @@ def audit_log(action: str):
         action: Action being performed
     """
     def decorator(func):
+        if iscoroutinefunction(func):
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                # TODO: Implement audit logging
+                # Log: timestamp, user_id, action, details
+                return await func(*args, **kwargs)
+
+            return async_wrapper
+
         @wraps(func)
-        async def wrapper(*args, **kwargs):
+        def wrapper(*args, **kwargs):
             # TODO: Implement audit logging
             # Log: timestamp, user_id, action, details
-            result = await func(*args, **kwargs)
-            return result
+            return func(*args, **kwargs)
+
         return wrapper
+
     return decorator
