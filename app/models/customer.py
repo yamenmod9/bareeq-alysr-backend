@@ -75,6 +75,17 @@ class Customer(db.Model):
         self.credit_limit = new_limit
         self.available_balance += difference
         return True
+
+    def regenerate_customer_code(self) -> str:
+        """Generate and assign a fresh unique customer code."""
+        max_attempts = 20
+        for _ in range(max_attempts):
+            code = generate_customer_code()
+            existing = Customer.query.filter_by(customer_code=code).first()
+            if not existing or existing.id == self.id:
+                self.customer_code = code
+                return code
+        raise RuntimeError("Failed to generate unique customer code")
     
     def to_dict(self):
         """Convert to dictionary"""

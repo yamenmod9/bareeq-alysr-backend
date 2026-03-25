@@ -24,6 +24,32 @@ def _pagination_params():
     return page, page_size
 
 
+def _resolve_customer_by_identifier(customer_identifier):
+    """Resolve customer and user by customer code, phone, or email."""
+    from app.models import Customer, User
+
+    identifier = (customer_identifier or '').strip()
+    if not identifier:
+        return None, None
+
+    customer = None
+    customer_user = None
+
+    if len(identifier) == 8 and identifier.isalnum():
+        customer = Customer.query.filter_by(customer_code=identifier.upper()).first()
+        if customer:
+            customer_user = db.session.get(User, customer.user_id)
+
+    if not customer:
+        customer_user = User.query.filter(
+            (User.phone == identifier) | (User.email == identifier.lower())
+        ).first()
+        if customer_user:
+            customer = Customer.query.filter_by(user_id=customer_user.id).first()
+
+    return customer, customer_user
+
+
 def get_current_user_flask():
     """Get current user from JWT token in request headers"""
     auth_header = request.headers.get('Authorization', '')
@@ -437,6 +463,42 @@ def customer_profile(user):
             }
         },
         "message": "Customer profile retrieved"
+    })
+
+
+@api.route('/customers/me/regenerate-code', methods=['POST'])
+@require_role('customer')
+def customer_regenerate_code(user):
+    """Regenerate customer unique code for merchant lookup."""
+    from app.models import Customer
+
+    customer = Customer.query.filter_by(user_id=user.id).first()
+    if not customer:
+        return jsonify({
+            "success": False,
+            "error": "NOT_FOUND",
+            "message": "Customer profile not found"
+        }), 404
+
+    old_code = customer.customer_code
+    try:
+        new_code = customer.regenerate_customer_code()
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        return jsonify({
+            "success": False,
+            "error": "CODE_REGENERATION_FAILED",
+            "message": "Could not regenerate customer code"
+        }), 500
+
+    return jsonify({
+        "success": True,
+        "data": {
+            "old_customer_code": old_code,
+            "customer_code": new_code
+        },
+        "message": "Customer code regenerated successfully"
     })
 
 
@@ -1041,25 +1103,7 @@ def merchant_profile(user):
 @require_role('merchant')
 def lookup_customer(user, customer_identifier):
     """Look up customer by phone, email, or customer code"""
-    from app.models import Customer, User
-    
-    # Try to find customer by different identifiers
-    customer = None
-    customer_user = None
-    
-    # First try by customer code (if it looks like one)
-    if len(customer_identifier) == 8 and customer_identifier.isalnum():
-        customer = Customer.query.filter_by(customer_code=customer_identifier.upper()).first()
-        if customer:
-            customer_user = db.session.get(User, customer.user_id)
-    
-    # If not found, try by phone or email
-    if not customer:
-        customer_user = User.query.filter(
-            (User.phone == customer_identifier) | (User.email == customer_identifier)
-        ).first()
-        if customer_user:
-            customer = Customer.query.filter_by(user_id=customer_user.id).first()
+    customer, customer_user = _resolve_customer_by_identifier(customer_identifier)
     
     if not customer or not customer_user:
         return jsonify({
@@ -1127,28 +1171,22 @@ def merchant_purchase_requests_list(user):
 @require_role('merchant')
 def create_purchase_request(user):
     """Create a new purchase request"""
-    from app.models import Merchant, Customer, User, PurchaseRequest
+    from app.models import Merchant, PurchaseRequest
     from datetime import datetime, timedelta
     import uuid
     
-    data = request.get_json()
+    data = request.get_json() or {}
     merchant = Merchant.query.filter_by(user_id=user.id).first()
     
     if not merchant:
         return jsonify({"success": False, "message": "Merchant not found"}), 404
     
-    # Find customer by phone or email
-    customer_identifier = data.get('customer_identifier')
-    customer_user = User.query.filter(
-        (User.phone == customer_identifier) | (User.email == customer_identifier)
-    ).first()
-    
-    if not customer_user:
-        return jsonify({"success": False, "message": "Customer not found"}), 404
-    
-    customer = Customer.query.filter_by(user_id=customer_user.id).first()
+    # Preferred identifier is customer code, with email/phone backward compatibility.
+    customer_identifier = data.get('customer_code') or data.get('customer_identifier')
+    customer, customer_user = _resolve_customer_by_identifier(customer_identifier)
+
     if not customer:
-        return jsonify({"success": False, "message": "Customer profile not found"}), 404
+        return jsonify({"success": False, "message": "Customer not found"}), 404
     
     amount = float(data.get('amount', 0))
     
@@ -1183,6 +1221,7 @@ def create_purchase_request(user):
             "amount": float(pr.total_amount),
             "status": pr.status,
             "customer_name": customer_user.full_name,
+            "customer_code": customer.customer_code,
             "expires_at": pr.expires_at.isoformat()
         },
         "message": "Purchase request created"
@@ -1197,7 +1236,7 @@ def send_purchase_request(user):
     from datetime import datetime, timedelta
     import uuid
     
-    data = request.get_json()
+    data = request.get_json() or {}
     merchant = Merchant.query.filter_by(user_id=user.id).first()
     
     if not merchant:
@@ -1206,15 +1245,11 @@ def send_purchase_request(user):
     # Get customer ID from the request (frontend should send customer_id after lookup)
     customer_id = data.get('customer_id')
     if not customer_id:
-        # Fallback: try to find customer by identifier
-        customer_identifier = data.get('customer_identifier') or data.get('customer_phone') or data.get('customer_email')
+        # Fallback: resolve customer by code/identifier/email/phone.
+        customer_identifier = data.get('customer_code') or data.get('customer_identifier') or data.get('customer_phone') or data.get('customer_email')
         if customer_identifier:
-            customer_user = User.query.filter(
-                (User.phone == customer_identifier) | (User.email == customer_identifier)
-            ).first()
-            if customer_user:
-                customer = Customer.query.filter_by(user_id=customer_user.id).first()
-                customer_id = customer.id if customer else None
+            customer, _customer_user = _resolve_customer_by_identifier(customer_identifier)
+            customer_id = customer.id if customer else None
         
         if not customer_id:
             return jsonify({"success": False, "message": "Customer not found"}), 404
@@ -1258,6 +1293,7 @@ def send_purchase_request(user):
             "status": pr.status,
             "customer_name": customer_user.full_name,
             "customer_phone": customer_user.phone,
+            "customer_code": customer.customer_code,
             "expires_at": pr.expires_at.isoformat(),
             "created_at": pr.created_at.isoformat() if pr.created_at else None
         },

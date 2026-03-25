@@ -26,6 +26,19 @@ pip install -r requirements.txt
 python run.py
 ```
 
+## Seed development accounts
+
+Generate multiple customer and merchant accounts:
+
+```bash
+python seed.py --customers 20 --merchants 10 --password Seed@123
+```
+
+Notes:
+- Customers are created with auto-generated unique `customer_code`.
+- Merchants can look up customers using code via `GET /merchants/lookup-customer/<code>`.
+- Customers can regenerate code via `POST /customers/me/regenerate-code`.
+
 ## PythonAnywhere deployment
 
 1. Clone repository on PythonAnywhere.
