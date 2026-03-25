@@ -3,6 +3,7 @@ Flask Application
 Handles Flask-SQLAlchemy initialization and admin routes
 """
 import os
+from datetime import datetime, UTC
 from flask import Flask, jsonify, send_from_directory
 from flask_cors import CORS
 
@@ -46,6 +47,19 @@ def create_flask_app() -> Flask:
     
     # Register Flask routes (frontend serving)
     register_flask_routes(app)
+
+    @app.after_request
+    def ensure_response_envelope(response):
+        """Normalize JSON API envelopes with timestamp and error key."""
+        if response.is_json:
+            payload = response.get_json(silent=True)
+            if isinstance(payload, dict) and 'success' in payload:
+                if 'timestamp' not in payload:
+                    payload['timestamp'] = datetime.now(UTC).isoformat()
+                if 'error' not in payload:
+                    payload['error'] = None
+                response.set_data(app.json.dumps(payload))
+        return response
     
     return app
 

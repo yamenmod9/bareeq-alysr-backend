@@ -4,6 +4,7 @@ Provides active API endpoints for the Flask runtime
 """
 from flask import Blueprint, jsonify, request
 from functools import wraps
+from datetime import datetime
 
 from app.database import db
 from app.services.auth_service import AuthService
@@ -14,6 +15,13 @@ from app.config import Config
 
 # Create blueprint for API routes
 api = Blueprint('api', __name__)
+
+
+def _pagination_params():
+    """Read safe pagination query params."""
+    page = max(int(request.args.get('page', 1)), 1)
+    page_size = min(max(int(request.args.get('page_size', 20)), 1), 100)
+    return page, page_size
 
 
 def get_current_user_flask():
@@ -196,6 +204,115 @@ def get_me(user):
             "is_verified": user.is_verified
         },
         "message": "Profile retrieved"
+    })
+
+
+@api.route('/auth/profile', methods=['PATCH'])
+@require_auth
+def update_profile(user):
+    """Update authenticated user profile."""
+    data = request.get_json() or {}
+    try:
+        updated = AuthService.update_profile(
+            user_id=user.id,
+            full_name=data.get('full_name'),
+            phone=data.get('phone'),
+            email=data.get('email'),
+        )
+        return jsonify({
+            "success": True,
+            "data": {
+                "id": updated.id,
+                "email": updated.email,
+                "full_name": updated.full_name,
+                "phone": updated.phone,
+                "role": updated.role,
+            },
+            "message": "Profile updated"
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": "PROFILE_UPDATE_ERROR",
+            "message": str(e)
+        }), 400
+
+
+@api.route('/auth/change-password', methods=['POST'])
+@require_auth
+def change_password(user):
+    """Change account password."""
+    data = request.get_json() or {}
+    old_password = data.get('old_password', '')
+    new_password = data.get('new_password', '')
+    if len(new_password) < 8:
+        return jsonify({
+            "success": False,
+            "error": "VALIDATION_ERROR",
+            "message": "New password must be at least 8 characters"
+        }), 400
+
+    try:
+        AuthService.change_password(user.id, old_password, new_password)
+        return jsonify({
+            "success": True,
+            "data": {"changed": True},
+            "message": "Password changed"
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": "CHANGE_PASSWORD_ERROR",
+            "message": str(e)
+        }), 400
+
+
+@api.route('/auth/verify-nafath', methods=['POST'])
+@require_auth
+def verify_nafath(user):
+    """Simulate Nafath verification."""
+    data = request.get_json() or {}
+    national_id = (data.get('national_id') or '').strip()
+    if len(national_id) != 10 or not national_id.isdigit():
+        return jsonify({
+            "success": False,
+            "error": "VALIDATION_ERROR",
+            "message": "National ID must be 10 digits"
+        }), 400
+    try:
+        AuthService.simulate_nafath_verification(user.id, national_id)
+        refreshed_user = AuthService.get_user_by_id(user.id)
+        return jsonify({
+            "success": True,
+            "data": {
+                "nafath_verified": refreshed_user.nafath_verified,
+                "is_verified": refreshed_user.is_verified,
+                "national_id": refreshed_user.national_id,
+            },
+            "message": "Nafath verification successful"
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": "NAFATH_VERIFICATION_ERROR",
+            "message": str(e)
+        }), 400
+
+
+@api.route('/auth/2fa', methods=['POST'])
+@require_auth
+def configure_2fa(user):
+    """Enable/disable simulated 2FA."""
+    data = request.get_json() or {}
+    enabled = bool(data.get('enabled', True))
+    user.two_factor_enabled = enabled
+    db.session.commit()
+    return jsonify({
+        "success": True,
+        "data": {
+            "two_factor_enabled": user.two_factor_enabled,
+        },
+        "message": "2FA preferences updated"
     })
 
 
@@ -1148,6 +1265,56 @@ def send_purchase_request(user):
     }), 201
 
 
+@api.route('/merchants/request-withdrawal', methods=['POST'])
+@require_role('merchant')
+def merchant_request_withdrawal(user):
+    """Create a pending merchant withdrawal settlement request."""
+    from app.models import Merchant, Settlement
+
+    merchant = Merchant.query.filter_by(user_id=user.id).first()
+    if not merchant:
+        return jsonify({"success": False, "message": "Merchant not found"}), 404
+
+    data = request.get_json() or {}
+    amount = float(data.get('amount', 0) or 0)
+    if amount <= 0:
+        return jsonify({
+            "success": False,
+            "error": "VALIDATION_ERROR",
+            "message": "Amount must be positive"
+        }), 400
+
+    if amount > float(merchant.balance or 0):
+        return jsonify({
+            "success": False,
+            "error": "INSUFFICIENT_BALANCE",
+            "message": "Withdrawal amount exceeds merchant balance"
+        }), 400
+
+    commission_rate = Config.PLATFORM_COMMISSION_RATE
+    commission_amount = amount * commission_rate
+    net_amount = amount - commission_amount
+
+    settlement = Settlement(
+        merchant_id=merchant.id,
+        settlement_type='withdrawal',
+        gross_amount=amount,
+        commission_rate=commission_rate,
+        commission_amount=commission_amount,
+        net_amount=net_amount,
+        status='pending',
+        notes=data.get('notes'),
+    )
+    db.session.add(settlement)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "data": settlement.to_dict(),
+        "message": "Withdrawal request created"
+    }), 201
+
+
 @api.route('/customers/purchase-requests/pending', methods=['GET'])
 @require_role('customer')
 def get_pending_requests(user):
@@ -1365,3 +1532,200 @@ def health_check():
         },
         "message": "Service is healthy"
     })
+
+
+# === Admin Routes ===
+
+@api.route('/admin/dashboard/stats', methods=['GET'])
+@require_role('admin')
+def admin_dashboard_stats(user):
+    """Admin dashboard aggregate metrics."""
+    from sqlalchemy import func
+    from app.models import User, Customer, Merchant, Transaction, PurchaseRequest, Settlement
+
+    data = {
+        "total_users": User.query.count(),
+        "total_customers": Customer.query.count(),
+        "total_merchants": Merchant.query.count(),
+        "total_transactions": Transaction.query.count(),
+        "active_transactions": Transaction.query.filter_by(status='active').count(),
+        "total_purchase_requests": PurchaseRequest.query.count(),
+        "pending_purchase_requests": PurchaseRequest.query.filter_by(status='pending').count(),
+        "total_settlements": Settlement.query.count(),
+        "pending_settlements": Settlement.query.filter_by(status='pending').count(),
+        "platform_commission": float(
+            db.session.query(func.sum(Settlement.commission_amount)).scalar() or 0
+        ),
+    }
+    return jsonify({"success": True, "data": data, "message": "Admin stats retrieved"})
+
+
+@api.route('/admin/users', methods=['GET'])
+@require_role('admin')
+def admin_users(user):
+    from app.models import User
+    page, page_size = _pagination_params()
+    query = User.query
+    role = request.args.get('role')
+    if role:
+        query = query.filter_by(role=role)
+    items = query.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return jsonify({
+        "success": True,
+        "data": [i.to_dict() for i in items],
+        "message": "Users retrieved",
+        "pagination": {"page": page, "page_size": page_size, "total": query.count()},
+    })
+
+
+@api.route('/admin/customers', methods=['GET'])
+@require_role('admin')
+def admin_customers(user):
+    from app.models import Customer
+    page, page_size = _pagination_params()
+    query = Customer.query
+    status = request.args.get('status')
+    if status:
+        query = query.filter_by(status=status)
+    items = query.order_by(Customer.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return jsonify({
+        "success": True,
+        "data": [i.to_dict() for i in items],
+        "message": "Customers retrieved",
+        "pagination": {"page": page, "page_size": page_size, "total": query.count()},
+    })
+
+
+@api.route('/admin/merchants', methods=['GET'])
+@require_role('admin')
+def admin_merchants(user):
+    from app.models import Merchant
+    page, page_size = _pagination_params()
+    query = Merchant.query
+    status = request.args.get('status')
+    if status:
+        query = query.filter_by(status=status)
+    items = query.order_by(Merchant.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return jsonify({
+        "success": True,
+        "data": [i.to_dict() for i in items],
+        "message": "Merchants retrieved",
+        "pagination": {"page": page, "page_size": page_size, "total": query.count()},
+    })
+
+
+@api.route('/admin/transactions', methods=['GET'])
+@require_role('admin')
+def admin_transactions(user):
+    from app.models import Transaction
+    page, page_size = _pagination_params()
+    query = Transaction.query
+    status = request.args.get('status')
+    if status:
+        query = query.filter_by(status=status)
+    items = query.order_by(Transaction.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return jsonify({
+        "success": True,
+        "data": [i.to_dict() for i in items],
+        "message": "Transactions retrieved",
+        "pagination": {"page": page, "page_size": page_size, "total": query.count()},
+    })
+
+
+@api.route('/admin/purchase-requests', methods=['GET'])
+@require_role('admin')
+def admin_purchase_requests(user):
+    from app.models import PurchaseRequest
+    page, page_size = _pagination_params()
+    query = PurchaseRequest.query
+    status = request.args.get('status')
+    if status:
+        query = query.filter_by(status=status)
+    items = query.order_by(PurchaseRequest.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return jsonify({
+        "success": True,
+        "data": [i.to_dict() for i in items],
+        "message": "Purchase requests retrieved",
+        "pagination": {"page": page, "page_size": page_size, "total": query.count()},
+    })
+
+
+@api.route('/admin/settlements', methods=['GET'])
+@require_role('admin')
+def admin_settlements(user):
+    from app.models import Settlement
+    page, page_size = _pagination_params()
+    query = Settlement.query
+    status = request.args.get('status')
+    if status:
+        query = query.filter_by(status=status)
+    items = query.order_by(Settlement.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return jsonify({
+        "success": True,
+        "data": [i.to_dict() for i in items],
+        "message": "Settlements retrieved",
+        "pagination": {"page": page, "page_size": page_size, "total": query.count()},
+    })
+
+
+@api.route('/admin/users/<int:user_id>/status', methods=['PUT'])
+@require_role('admin')
+def moderate_user_status(user, user_id):
+    from app.models import User
+    target = db.session.get(User, user_id)
+    if not target:
+        return jsonify({"success": False, "message": "User not found"}), 404
+    data = request.get_json() or {}
+    target.is_active = bool(data.get('is_active', True))
+    db.session.commit()
+    return jsonify({"success": True, "data": target.to_dict(), "message": "User status updated"})
+
+
+@api.route('/admin/customers/<int:customer_id>/status', methods=['PUT'])
+@require_role('admin')
+def moderate_customer_status(user, customer_id):
+    from app.models import Customer
+    target = db.session.get(Customer, customer_id)
+    if not target:
+        return jsonify({"success": False, "message": "Customer not found"}), 404
+    data = request.get_json() or {}
+    status = data.get('status')
+    if not status:
+        return jsonify({"success": False, "message": "status is required"}), 400
+    target.status = status
+    db.session.commit()
+    return jsonify({"success": True, "data": target.to_dict(), "message": "Customer status updated"})
+
+
+@api.route('/admin/merchants/<int:merchant_id>/status', methods=['PUT'])
+@require_role('admin')
+def moderate_merchant_status(user, merchant_id):
+    from app.models import Merchant
+    target = db.session.get(Merchant, merchant_id)
+    if not target:
+        return jsonify({"success": False, "message": "Merchant not found"}), 404
+    data = request.get_json() or {}
+    if 'status' in data:
+        target.status = data.get('status')
+    if 'is_verified' in data:
+        target.is_verified = bool(data.get('is_verified'))
+    db.session.commit()
+    return jsonify({"success": True, "data": target.to_dict(), "message": "Merchant status updated"})
+
+
+@api.route('/admin/settlements/<int:settlement_id>/status', methods=['PUT'])
+@require_role('admin')
+def moderate_settlement_status(user, settlement_id):
+    from app.models import Settlement
+    target = db.session.get(Settlement, settlement_id)
+    if not target:
+        return jsonify({"success": False, "message": "Settlement not found"}), 404
+    data = request.get_json() or {}
+    status = data.get('status')
+    if not status:
+        return jsonify({"success": False, "message": "status is required"}), 400
+    target.status = status
+    if status == 'completed':
+        target.completed_at = datetime.utcnow()
+    db.session.commit()
+    return jsonify({"success": True, "data": target.to_dict(), "message": "Settlement status updated"})
