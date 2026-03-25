@@ -1,0 +1,39 @@
+# Bareeq Al-Yusr BNPL Platform - Dependencies
+
+# Web Frameworks
+flask==3.0.0
+gunicorn==21.2.0
+
+# Database
+flask-sqlalchemy==3.1.1
+flask-migrate==4.0.5
+sqlalchemy==2.0.25
+
+# Authentication
+pyjwt==2.8.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.6
+
+# Validation & Serialization
+marshmallow==3.22.0
+flask-marshmallow==1.2.1
+email-validator==2.1.0
+
+# Environment & Config
+python-dotenv==1.0.0
+
+# Date/Time Utilities
+python-dateutil==2.8.2
+
+# CORS Support
+flask-cors==4.0.0
+
+# Rate Limiting
+slowapi==0.1.9
+
+# Testing (optional)
+pytest==7.4.4
+httpx==0.26.0
+
+# Development
+watchdog==3.0.0
