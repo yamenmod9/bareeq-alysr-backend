@@ -78,6 +78,7 @@ def _seed_customer_and_merchant():
 
         return {
             "customer_email": customer_user.email,
+            "customer_code": customer.customer_code,
             "merchant_email": merchant_user.email,
             "password": "password123",
         }
@@ -177,7 +178,7 @@ class TestCustomerCriticalFlow:
             "/merchants/send-purchase-request",
             headers=_auth_headers(merchant_token),
             json={
-                "customer_identifier": seed["customer_email"],
+                "customer_code": seed["customer_code"],
                 "amount": 250,
                 "description": "Laptop accessories",
             },
@@ -221,7 +222,7 @@ class TestCustomerCriticalFlow:
             "/merchants/purchase-requests",
             headers=_auth_headers(merchant_token),
             json={
-                "customer_identifier": seed["customer_email"],
+                "customer_code": seed["customer_code"],
                 "amount": 120,
                 "description": "Small appliance",
             },
@@ -246,18 +247,19 @@ class TestMerchantCriticalFlow:
         merchant_token = _login(client, seed["merchant_email"], seed["password"])
 
         lookup_response = client.get(
-            f"/merchants/lookup-customer/{seed['customer_email']}",
+            f"/merchants/lookup-customer/{seed['customer_code']}",
             headers=_auth_headers(merchant_token),
         )
         assert lookup_response.status_code == 200
         lookup_data = lookup_response.get_json()["data"]
         assert lookup_data["email"] == seed["customer_email"]
+        assert lookup_data["customer_code"] == seed["customer_code"]
 
         create_response = client.post(
             "/merchants/send-purchase-request",
             headers=_auth_headers(merchant_token),
             json={
-                "customer_identifier": seed["customer_email"],
+                "customer_code": seed["customer_code"],
                 "amount": 90,
                 "description": "Phone case",
             },

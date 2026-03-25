@@ -173,6 +173,11 @@ def run_full_backend_self_test(app) -> Dict[str, Any]:
 
         customer_headers = {"Authorization": f"Bearer {customer_token}"} if customer_token else {}
         merchant_headers = {"Authorization": f"Bearer {merchant_token}"} if merchant_token else {}
+        seed_customer_code = None
+        seed_customer_user = User.query.filter_by(email="customer@test.com").first()
+        if seed_customer_user:
+            seed_customer = Customer.query.filter_by(user_id=seed_customer_user.id).first()
+            seed_customer_code = seed_customer.customer_code if seed_customer else None
 
         # Prepare request/transaction IDs for parameterized endpoints.
         accept_request_id = None
@@ -181,7 +186,7 @@ def run_full_backend_self_test(app) -> Dict[str, Any]:
         payment_id = None
         payment_reference = None
 
-        if merchant_token:
+        if merchant_token and seed_customer_code:
             accept_req_response, accept_req_payload = _run_endpoint(
                 checks,
                 client,
@@ -189,7 +194,7 @@ def run_full_backend_self_test(app) -> Dict[str, Any]:
                 "POST",
                 "/merchants/send-purchase-request",
                 headers=merchant_headers,
-                body={"customer_identifier": "customer@test.com", "amount": 200, "description": "Self-test accept"},
+                body={"customer_code": seed_customer_code, "amount": 200, "description": "Self-test accept"},
                 expected_statuses=[201],
             )
             accept_request_id = (accept_req_payload.get("data") or {}).get("id")
@@ -201,7 +206,7 @@ def run_full_backend_self_test(app) -> Dict[str, Any]:
                 "POST",
                 "/merchants/send-purchase-request",
                 headers=merchant_headers,
-                body={"customer_identifier": "customer@test.com", "amount": 50, "description": "Self-test reject"},
+                body={"customer_code": seed_customer_code, "amount": 50, "description": "Self-test reject"},
                 expected_statuses=[201],
             )
             reject_request_id = (reject_req_payload.get("data") or {}).get("id")
@@ -278,13 +283,19 @@ def run_full_backend_self_test(app) -> Dict[str, Any]:
             ("GET", "/merchants/transactions", merchant_headers, None, [200]),
             ("GET", "/merchants/settlements", merchant_headers, None, [200]),
             ("GET", "/merchants/me", merchant_headers, None, [200]),
-            ("GET", "/merchants/lookup-customer/customer@test.com", merchant_headers, None, [200]),
             ("GET", "/merchants/purchase-requests", merchant_headers, None, [200]),
-            ("POST", "/merchants/purchase-requests", merchant_headers, {"customer_identifier": "customer@test.com", "amount": 20, "description": "Endpoint check"}, [201]),
-            ("POST", "/merchants/send-purchase-request", merchant_headers, {"customer_identifier": "customer@test.com", "amount": 20, "description": "Endpoint check alt"}, [201]),
             # duplicate health route check
             ("GET", "/health", None, None, [200]),
         ]
+
+        if seed_customer_code:
+            endpoint_specs.extend(
+                [
+                    ("GET", f"/merchants/lookup-customer/{seed_customer_code}", merchant_headers, None, [200]),
+                    ("POST", "/merchants/purchase-requests", merchant_headers, {"customer_code": seed_customer_code, "amount": 20, "description": "Endpoint check"}, [201]),
+                    ("POST", "/merchants/send-purchase-request", merchant_headers, {"customer_code": seed_customer_code, "amount": 20, "description": "Endpoint check alt"}, [201]),
+                ]
+            )
 
         if accept_request_id:
             endpoint_specs.append(("POST", f"/customers/purchase-requests/{accept_request_id}/accept", customer_headers, {}, [200, 400]))

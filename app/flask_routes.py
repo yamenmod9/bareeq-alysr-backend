@@ -24,28 +24,22 @@ def _pagination_params():
     return page, page_size
 
 
-def _resolve_customer_by_identifier(customer_identifier):
-    """Resolve customer and user by customer code, phone, or email."""
+def _resolve_customer_by_code(customer_code):
+    """Resolve customer and user by customer code only."""
     from app.models import Customer, User
 
-    identifier = (customer_identifier or '').strip()
-    if not identifier:
+    normalized_code = (customer_code or '').strip().upper()
+    if not normalized_code:
         return None, None
 
-    customer = None
-    customer_user = None
+    if len(normalized_code) != 8 or not normalized_code.isalnum():
+        return None, None
 
-    if len(identifier) == 8 and identifier.isalnum():
-        customer = Customer.query.filter_by(customer_code=identifier.upper()).first()
-        if customer:
-            customer_user = db.session.get(User, customer.user_id)
-
+    customer = Customer.query.filter_by(customer_code=normalized_code).first()
     if not customer:
-        customer_user = User.query.filter(
-            (User.phone == identifier) | (User.email == identifier.lower())
-        ).first()
-        if customer_user:
-            customer = Customer.query.filter_by(user_id=customer_user.id).first()
+        return None, None
+
+    customer_user = db.session.get(User, customer.user_id)
 
     return customer, customer_user
 
@@ -1099,11 +1093,11 @@ def merchant_profile(user):
     })
 
 
-@api.route('/merchants/lookup-customer/<customer_identifier>', methods=['GET'])
+@api.route('/merchants/lookup-customer/<customer_code>', methods=['GET'])
 @require_role('merchant')
-def lookup_customer(user, customer_identifier):
-    """Look up customer by phone, email, or customer code"""
-    customer, customer_user = _resolve_customer_by_identifier(customer_identifier)
+def lookup_customer(user, customer_code):
+    """Look up customer by customer code"""
+    customer, customer_user = _resolve_customer_by_code(customer_code)
     
     if not customer or not customer_user:
         return jsonify({
@@ -1181,9 +1175,11 @@ def create_purchase_request(user):
     if not merchant:
         return jsonify({"success": False, "message": "Merchant not found"}), 404
     
-    # Preferred identifier is customer code, with email/phone backward compatibility.
-    customer_identifier = data.get('customer_code') or data.get('customer_identifier')
-    customer, customer_user = _resolve_customer_by_identifier(customer_identifier)
+    customer_code = data.get('customer_code')
+    if not customer_code:
+        return jsonify({"success": False, "message": "customer_code is required"}), 400
+
+    customer, customer_user = _resolve_customer_by_code(customer_code)
 
     if not customer:
         return jsonify({"success": False, "message": "Customer not found"}), 404
@@ -1242,13 +1238,12 @@ def send_purchase_request(user):
     if not merchant:
         return jsonify({"success": False, "message": "Merchant not found"}), 404
     
-    # Get customer ID from the request (frontend should send customer_id after lookup)
+    # Preferred input is customer_id from lookup. customer_code is accepted as fallback.
     customer_id = data.get('customer_id')
     if not customer_id:
-        # Fallback: resolve customer by code/identifier/email/phone.
-        customer_identifier = data.get('customer_code') or data.get('customer_identifier') or data.get('customer_phone') or data.get('customer_email')
-        if customer_identifier:
-            customer, _customer_user = _resolve_customer_by_identifier(customer_identifier)
+        customer_code = data.get('customer_code')
+        if customer_code:
+            customer, _customer_user = _resolve_customer_by_code(customer_code)
             customer_id = customer.id if customer else None
         
         if not customer_id:
