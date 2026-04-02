@@ -17,6 +17,15 @@ class Config:
     # CORS
     CORS_ORIGINS = ['*']  # In production, specify actual origins
 
+    # Music sources integrations
+    LASTFM_API_KEY = os.environ.get('LASTFM_API_KEY')
+    MUSICBRAINZ_USER_AGENT = os.environ.get(
+        'MUSICBRAINZ_USER_AGENT',
+        'MusicPlayerApp/1.0 (your@email.com)'
+    )
+    API_CACHE_TTL = int(os.environ.get('API_CACHE_TTL', 3600))
+    EXTERNAL_API_TIMEOUT = int(os.environ.get('EXTERNAL_API_TIMEOUT', 12))
+
 
 class DevelopmentConfig(Config):
     DEBUG = True

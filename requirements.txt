@@ -5,3 +5,4 @@ Flask-CORS>=4.0.0
 Flask-Migrate>=4.0.0
 python-dotenv>=1.0.0
 bcrypt>=4.1.0
+requests>=2.31.0

@@ -13,5 +13,6 @@ if project_home not in sys.path:
 # Set environment variables (you can also set these in PythonAnywhere Web tab)
 os.environ['SECRET_KEY'] = 'change-this-to-a-secure-secret-key'
 os.environ['JWT_SECRET_KEY'] = 'change-this-to-a-secure-jwt-key'
+os.environ['LASTFM_API_KEY'] = 'set-your-lastfm-api-key'
 
 from app import app as application

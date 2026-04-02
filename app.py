@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 from config import config
 from extensions import db, jwt, cors, migrate
-from blueprints import auth_bp, playlists_bp, favorites_bp, history_bp
+from blueprints import auth_bp, playlists_bp, favorites_bp, history_bp, music_sources_bp
 
 
 # HTML template for the test page
@@ -591,6 +591,7 @@ def create_app(config_name=None):
     app.register_blueprint(playlists_bp)
     app.register_blueprint(favorites_bp)
     app.register_blueprint(history_bp)
+    app.register_blueprint(music_sources_bp)
     
     # Health check endpoint
     @app.route('/api/health')
