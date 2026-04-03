@@ -5,7 +5,12 @@ import re
 from difflib import SequenceMatcher
 from urllib.parse import quote
 
-import requests
+try:
+    import requests
+    from requests import RequestException
+except ModuleNotFoundError:
+    requests = None
+    RequestException = Exception
 from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import jwt_required
 
@@ -27,12 +32,45 @@ def _error(message: str, code: int):
     return jsonify({'error': message, 'code': code}), code
 
 
+def _requests_missing_error():
+    return _error(
+        'Server dependency requests is not installed. Install backend requirements.',
+        500,
+    )
+
+
 def _ttl() -> int:
     return int(current_app.config.get('API_CACHE_TTL', 3600))
 
 
 def _timeout() -> int:
     return int(current_app.config.get('EXTERNAL_API_TIMEOUT', 12))
+
+
+def _safe_get(
+    url: str,
+    *,
+    params=None,
+    headers=None,
+    timeout=None,
+    allow_redirects=True,
+    failure_message='External API request failed',
+):
+    if requests is None:
+        return None, _requests_missing_error()
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=_timeout() if timeout is None else timeout,
+            allow_redirects=allow_redirects,
+        )
+    except RequestException as exc:
+        return None, _error(f'{failure_message}: {exc}', 502)
+
+    return response, None
 
 
 def _cache_key(namespace: str, url: str, params=None, headers=None) -> str:
@@ -55,16 +93,15 @@ def _cached_json_request(namespace: str, url: str, params=None, headers=None, al
     if cached_value is not None:
         return cached_value, None
 
-    try:
-        response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            timeout=_timeout(),
-            allow_redirects=allow_redirects,
-        )
-    except requests.RequestException as exc:
-        return None, _error(f'External API request failed: {exc}', 502)
+    response, err = _safe_get(
+        url,
+        params=params,
+        headers=headers,
+        timeout=_timeout(),
+        allow_redirects=allow_redirects,
+    )
+    if err:
+        return None, err
 
     if response.status_code == 404:
         return None, _error('Resource not found', 404)
@@ -506,10 +543,13 @@ def get_lyrics():
 
     direct_url = f"{LYRICS_BASE_URL}/v1/{quote(artist)}/{quote(title)}"
 
-    try:
-        direct_response = requests.get(direct_url, timeout=_timeout())
-    except requests.RequestException as exc:
-        return _error(f'Lyrics request failed: {exc}', 502)
+    direct_response, err = _safe_get(
+        direct_url,
+        timeout=_timeout(),
+        failure_message='Lyrics request failed',
+    )
+    if err:
+        return err
 
     if direct_response.status_code == 200:
         payload = direct_response.json()
@@ -521,10 +561,13 @@ def get_lyrics():
         return _error(f'Lyrics API returned status {direct_response.status_code}', direct_response.status_code)
 
     suggest_url = f"{LYRICS_BASE_URL}/suggest/{quote(title)}"
-    try:
-        suggest_response = requests.get(suggest_url, timeout=_timeout())
-    except requests.RequestException as exc:
-        return _error(f'Lyrics suggest request failed: {exc}', 502)
+    suggest_response, err = _safe_get(
+        suggest_url,
+        timeout=_timeout(),
+        failure_message='Lyrics suggest request failed',
+    )
+    if err:
+        return err
 
     if suggest_response.status_code >= 400:
         return _error('Lyrics not found', 404)
@@ -548,10 +591,13 @@ def get_lyrics():
 
     fallback_url = f"{LYRICS_BASE_URL}/v1/{quote(candidate_artist)}/{quote(candidate_title)}"
 
-    try:
-        fallback_response = requests.get(fallback_url, timeout=_timeout())
-    except requests.RequestException as exc:
-        return _error(f'Lyrics fallback request failed: {exc}', 502)
+    fallback_response, err = _safe_get(
+        fallback_url,
+        timeout=_timeout(),
+        failure_message='Lyrics fallback request failed',
+    )
+    if err:
+        return err
 
     if fallback_response.status_code >= 400:
         return _error('Lyrics not found', 404)
@@ -616,10 +662,14 @@ def get_cover_art():
 
     url = f'{COVER_ART_BASE_URL}/release/{release_mbid}/front'
 
-    try:
-        response = requests.get(url, timeout=_timeout(), allow_redirects=False)
-    except requests.RequestException as exc:
-        return _error(f'Cover art request failed: {exc}', 502)
+    response, err = _safe_get(
+        url,
+        timeout=_timeout(),
+        allow_redirects=False,
+        failure_message='Cover art request failed',
+    )
+    if err:
+        return err
 
     if response.status_code in {301, 302, 303, 307, 308}:
         location = response.headers.get('Location')
