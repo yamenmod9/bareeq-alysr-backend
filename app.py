@@ -99,6 +99,7 @@ TEST_PAGE_HTML = '''
         .badge.fail { background: #ef4444; color: white; }
         .badge.pending { background: #6b7280; color: white; }
         .badge.running { background: #3b82f6; color: white; }
+        .badge.skip { background: #f59e0b; color: #111827; }
         .summary {
             display: flex;
             gap: 20px;
@@ -167,6 +168,10 @@ TEST_PAGE_HTML = '''
                 <div class="summary-label">Failed</div>
             </div>
             <div class="summary-card">
+                <div class="summary-value" style="color:#f59e0b" id="skippedTests">0</div>
+                <div class="summary-label">Skipped</div>
+            </div>
+            <div class="summary-card">
                 <div class="summary-value" style="color:#3b82f6" id="duration">0s</div>
                 <div class="summary-label">Duration</div>
             </div>
@@ -186,6 +191,18 @@ TEST_PAGE_HTML = '''
         let refreshToken = null;
         let testPlaylistId = null;
         let testResults = [];
+
+        const testPlaylistSongIds = [1001, 1002];
+        const musicProbe = {
+            trackId: null,
+            albumId: null,
+            artistId: null,
+            artistName: '',
+            trackTitle: '',
+            releaseMbid: null,
+            recordingMbid: null,
+            tadbArtistMbid: null,
+        };
         
         function log(msg, type = 'info') {
             const logEl = document.getElementById('logOutput');
@@ -200,6 +217,48 @@ TEST_PAGE_HTML = '''
             const badge = document.getElementById('statusBadge');
             badge.textContent = text;
             badge.className = 'status ' + cls;
+        }
+
+        function createSkip(message) {
+            const err = new Error(message);
+            err.isSkip = true;
+            return err;
+        }
+
+        function ensureValue(value, message) {
+            if (value === null || value === undefined || value === '') {
+                throw createSkip(message);
+            }
+            return value;
+        }
+
+        function encodeSegment(value) {
+            return encodeURIComponent(String(value || '').trim());
+        }
+
+        function getErrorMessage(response, fallback = 'Request failed') {
+            if (!response) {
+                return fallback;
+            }
+
+            const payload = response.data || {};
+            const message = payload.message || payload.error;
+            if (typeof message === 'string' && message.trim()) {
+                return message;
+            }
+
+            return `${fallback} (HTTP ${response.status})`;
+        }
+
+        function skipIfLastFmNotConfigured(response) {
+            if (!response || response.status !== 500) {
+                return;
+            }
+
+            const message = getErrorMessage(response, 'Last.fm request failed');
+            if (message.includes('LASTFM_API_KEY is not configured')) {
+                throw createSkip(message);
+            }
         }
         
         async function api(method, endpoint, data = null, auth = true) {
@@ -217,29 +276,50 @@ TEST_PAGE_HTML = '''
         }
         
         const tests = [
-            // Health Check
+            // Health and utility endpoints
             {
                 group: 'Health',
-                name: 'Health Check',
+                name: 'Root Page',
+                run: async () => {
+                    const resp = await fetch(window.location.origin + '/');
+                    if (!resp.ok) throw new Error(`Root page failed (HTTP ${resp.status})`);
+                    return { status: resp.status };
+                }
+            },
+            {
+                group: 'Health',
+                name: 'Test Page Endpoint',
+                run: async () => {
+                    const resp = await fetch(window.location.origin + '/test');
+                    if (!resp.ok) throw new Error(`Test page failed (HTTP ${resp.status})`);
+                    return { status: resp.status };
+                }
+            },
+            {
+                group: 'Health',
+                name: 'API Health Check',
                 run: async () => {
                     const r = await api('GET', '/health', null, false);
-                    if (!r.ok) throw new Error('Health check failed');
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Health check failed'));
                     return r.data;
                 }
             },
-            
-            // Auth Tests
+
+            // Authentication endpoints
             {
                 group: 'Authentication',
                 name: 'Register New User',
                 run: async () => {
+                    const uniqueSeed = Date.now();
                     testUser = {
-                        email: `test_${Date.now()}@example.com`,
+                        email: `test_${uniqueSeed}@example.com`,
                         password: 'test123456',
-                        username: 'TestUser'
+                        username: `TestUser_${uniqueSeed}`,
                     };
+
                     const r = await api('POST', '/auth/register', testUser, false);
-                    if (!r.ok) throw new Error(r.data.message || 'Registration failed');
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Registration failed'));
+
                     accessToken = r.data.access_token;
                     refreshToken = r.data.refresh_token;
                     return { userId: r.data.user.id, email: r.data.user.email };
@@ -249,12 +329,18 @@ TEST_PAGE_HTML = '''
                 group: 'Authentication',
                 name: 'Login',
                 run: async () => {
-                    const r = await api('POST', '/auth/login', {
-                        email: testUser.email,
-                        password: testUser.password
-                    }, false);
-                    if (!r.ok) throw new Error(r.data.message || 'Login failed');
+                    ensureValue(testUser?.email, 'Register New User must pass first');
+
+                    const r = await api(
+                        'POST',
+                        '/auth/login',
+                        { email: testUser.email, password: testUser.password },
+                        false
+                    );
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Login failed'));
                     accessToken = r.data.access_token;
+                    refreshToken = r.data.refresh_token;
                     return { success: true };
                 }
             },
@@ -263,36 +349,59 @@ TEST_PAGE_HTML = '''
                 name: 'Get Profile',
                 run: async () => {
                     const r = await api('GET', '/auth/me');
-                    if (!r.ok) throw new Error(r.data.message || 'Get profile failed');
-                    return r.data;
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get profile failed'));
+                    return { id: r.data.id, email: r.data.email };
+                }
+            },
+            {
+                group: 'Authentication',
+                name: 'Update Profile',
+                run: async () => {
+                    const updatedUsername = `Updated_${Date.now()}`;
+                    const r = await api('PUT', '/auth/update', {
+                        username: updatedUsername,
+                        avatar_url: 'https://example.com/avatar.png',
+                    });
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Update profile failed'));
+                    return { username: r.data.username, avatarUrl: r.data.avatarUrl };
                 }
             },
             {
                 group: 'Authentication',
                 name: 'Refresh Token',
                 run: async () => {
+                    ensureValue(refreshToken, 'Refresh token is not available');
+
                     const headers = {
                         'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + refreshToken
+                        Authorization: 'Bearer ' + refreshToken,
                     };
+
                     const resp = await fetch(API_BASE + '/auth/refresh', { method: 'POST', headers });
-                    const data = await resp.json();
-                    if (!resp.ok) throw new Error(data.message || 'Refresh failed');
+                    const data = await resp.json().catch(() => ({}));
+
+                    if (!resp.ok) {
+                        throw new Error(data.message || data.error || `Refresh failed (HTTP ${resp.status})`);
+                    }
+
                     accessToken = data.access_token;
-                    return { newTokenReceived: true };
+                    refreshToken = data.refresh_token;
+                    return { refreshed: true };
                 }
             },
-            
-            // Playlist Tests
+
+            // Playlist endpoints
             {
                 group: 'Playlists',
                 name: 'Create Playlist',
                 run: async () => {
                     const r = await api('POST', '/playlists', {
                         name: 'Test Playlist',
-                        description: 'Created by automated test'
+                        description: 'Created by automated test',
                     });
-                    if (!r.ok) throw new Error(r.data.message || 'Create playlist failed');
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Create playlist failed'));
                     testPlaylistId = r.data.id;
                     return { playlistId: testPlaylistId };
                 }
@@ -302,57 +411,116 @@ TEST_PAGE_HTML = '''
                 name: 'Get All Playlists',
                 run: async () => {
                     const r = await api('GET', '/playlists');
-                    if (!r.ok) throw new Error(r.data.message || 'Get playlists failed');
-                    return { count: r.data.length };
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get playlists failed'));
+                    return { count: Array.isArray(r.data) ? r.data.length : 0 };
                 }
             },
             {
                 group: 'Playlists',
                 name: 'Get Single Playlist',
                 run: async () => {
-                    const r = await api('GET', '/playlists/' + testPlaylistId);
-                    if (!r.ok) throw new Error(r.data.message || 'Get playlist failed');
+                    const playlistId = ensureValue(testPlaylistId, 'Create Playlist must pass first');
+                    const r = await api('GET', '/playlists/' + playlistId);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get playlist failed'));
                     return { name: r.data.name };
                 }
             },
             {
                 group: 'Playlists',
-                name: 'Add Song to Playlist',
+                name: 'Add Song 1 to Playlist',
                 run: async () => {
-                    const r = await api('POST', `/playlists/${testPlaylistId}/songs`, {
-                        id: 1001,
-                        title: 'Test Song',
+                    const playlistId = ensureValue(testPlaylistId, 'Create Playlist must pass first');
+                    const songId = testPlaylistSongIds[0];
+
+                    const r = await api('POST', `/playlists/${playlistId}/songs`, {
+                        id: songId,
+                        title: 'Test Song 1',
                         artist: 'Test Artist',
                         album: 'Test Album',
-                        path: '/music/test.mp3',
-                        duration: 180000
+                        path: '/music/test1.mp3',
+                        duration: 180000,
                     });
-                    if (!r.ok) throw new Error(r.data.message || 'Add song failed');
-                    return { success: true };
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Add song 1 failed'));
+                    return { songId };
+                }
+            },
+            {
+                group: 'Playlists',
+                name: 'Add Song 2 to Playlist',
+                run: async () => {
+                    const playlistId = ensureValue(testPlaylistId, 'Create Playlist must pass first');
+                    const songId = testPlaylistSongIds[1];
+
+                    const r = await api('POST', `/playlists/${playlistId}/songs`, {
+                        id: songId,
+                        title: 'Test Song 2',
+                        artist: 'Test Artist',
+                        album: 'Test Album',
+                        path: '/music/test2.mp3',
+                        duration: 185000,
+                    });
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Add song 2 failed'));
+                    return { songId };
+                }
+            },
+            {
+                group: 'Playlists',
+                name: 'Reorder Playlist Songs',
+                run: async () => {
+                    const playlistId = ensureValue(testPlaylistId, 'Create Playlist must pass first');
+                    const newOrder = [testPlaylistSongIds[1], testPlaylistSongIds[0]];
+
+                    const r = await api('PUT', `/playlists/${playlistId}/reorder`, {
+                        song_ids: newOrder,
+                    });
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Reorder playlist failed'));
+
+                    const songs = Array.isArray(r.data.songs) ? r.data.songs : [];
+                    const orderedIds = songs.map((s) => s.id).slice(0, 2);
+                    return { expectedOrder: newOrder, returnedOrder: orderedIds };
                 }
             },
             {
                 group: 'Playlists',
                 name: 'Update Playlist',
                 run: async () => {
-                    const r = await api('PUT', '/playlists/' + testPlaylistId, {
-                        name: 'Updated Test Playlist'
+                    const playlistId = ensureValue(testPlaylistId, 'Create Playlist must pass first');
+                    const r = await api('PUT', '/playlists/' + playlistId, {
+                        name: 'Updated Test Playlist',
+                        description: 'Updated by automated test',
                     });
-                    if (!r.ok) throw new Error(r.data.message || 'Update playlist failed');
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Update playlist failed'));
                     return { newName: r.data.name };
                 }
             },
             {
                 group: 'Playlists',
-                name: 'Remove Song from Playlist',
+                name: 'Remove Song 1 from Playlist',
                 run: async () => {
-                    const r = await api('DELETE', `/playlists/${testPlaylistId}/songs/1001`);
-                    if (!r.ok) throw new Error(r.data.message || 'Remove song failed');
-                    return { success: true };
+                    const playlistId = ensureValue(testPlaylistId, 'Create Playlist must pass first');
+                    const songId = testPlaylistSongIds[0];
+                    const r = await api('DELETE', `/playlists/${playlistId}/songs/${songId}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Remove song 1 failed'));
+                    return { songId };
                 }
             },
-            
-            // Favorites Tests
+            {
+                group: 'Playlists',
+                name: 'Remove Song 2 from Playlist',
+                run: async () => {
+                    const playlistId = ensureValue(testPlaylistId, 'Create Playlist must pass first');
+                    const songId = testPlaylistSongIds[1];
+                    const r = await api('DELETE', `/playlists/${playlistId}/songs/${songId}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Remove song 2 failed'));
+                    return { songId };
+                }
+            },
+
+            // Favorites endpoints
             {
                 group: 'Favorites',
                 name: 'Add to Favorites',
@@ -363,9 +531,10 @@ TEST_PAGE_HTML = '''
                         artist: 'Favorite Artist',
                         album: 'Favorite Album',
                         path: '/music/favorite.mp3',
-                        duration: 200000
+                        duration: 200000,
                     });
-                    if (!r.ok) throw new Error(r.data.message || 'Add favorite failed');
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Add favorite failed'));
                     return { success: true };
                 }
             },
@@ -374,8 +543,8 @@ TEST_PAGE_HTML = '''
                 name: 'Get All Favorites',
                 run: async () => {
                     const r = await api('GET', '/favorites');
-                    if (!r.ok) throw new Error(r.data.message || 'Get favorites failed');
-                    return { count: r.data.length };
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get favorites failed'));
+                    return { count: Array.isArray(r.data) ? r.data.length : 0 };
                 }
             },
             {
@@ -383,8 +552,8 @@ TEST_PAGE_HTML = '''
                 name: 'Check Favorite Status',
                 run: async () => {
                     const r = await api('GET', '/favorites/2001/check');
-                    if (!r.ok) throw new Error(r.data.message || 'Check favorite failed');
-                    return { isFavorite: r.data.is_favorite };
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Check favorite failed'));
+                    return { isFavorite: !!r.data.is_favorite };
                 }
             },
             {
@@ -392,12 +561,12 @@ TEST_PAGE_HTML = '''
                 name: 'Remove from Favorites',
                 run: async () => {
                     const r = await api('DELETE', '/favorites/2001');
-                    if (!r.ok) throw new Error(r.data.message || 'Remove favorite failed');
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Remove favorite failed'));
                     return { success: true };
                 }
             },
-            
-            // History Tests
+
+            // History endpoints
             {
                 group: 'History',
                 name: 'Add to History',
@@ -408,9 +577,10 @@ TEST_PAGE_HTML = '''
                         artist: 'History Artist',
                         album: 'History Album',
                         path: '/music/history.mp3',
-                        duration: 250000
+                        duration: 250000,
                     });
-                    if (!r.ok) throw new Error(r.data.message || 'Add history failed');
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Add history failed'));
                     return { success: true };
                 }
             },
@@ -418,9 +588,9 @@ TEST_PAGE_HTML = '''
                 group: 'History',
                 name: 'Get Play History',
                 run: async () => {
-                    const r = await api('GET', '/history');
-                    if (!r.ok) throw new Error(r.data.message || 'Get history failed');
-                    return { count: r.data.length };
+                    const r = await api('GET', '/history?limit=10');
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get history failed'));
+                    return { count: Array.isArray(r.data) ? r.data.length : 0 };
                 }
             },
             {
@@ -428,21 +598,265 @@ TEST_PAGE_HTML = '''
                 name: 'Clear History',
                 run: async () => {
                     const r = await api('DELETE', '/history');
-                    if (!r.ok) throw new Error(r.data.message || 'Clear history failed');
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Clear history failed'));
                     return { success: true };
                 }
             },
-            
-            // Cleanup
+
+            // Music source endpoints
+            {
+                group: 'Music Sources',
+                name: 'Search Tracks (public)',
+                run: async () => {
+                    const r = await api('GET', `/music/search?q=${encodeSegment('Daft Punk')}&type=track`, null, false);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Track search failed'));
+
+                    const tracks = Array.isArray(r.data.data) ? r.data.data : [];
+                    if (!tracks.length) throw createSkip('No track search results were returned');
+
+                    const first = tracks[0] || {};
+                    musicProbe.trackId = first.id || null;
+                    musicProbe.albumId = first.album_id || null;
+                    musicProbe.artistId = first.artist_id || null;
+                    musicProbe.artistName = first.artist || '';
+                    musicProbe.trackTitle = first.title || '';
+
+                    return {
+                        count: tracks.length,
+                        trackId: musicProbe.trackId,
+                        artist: musicProbe.artistName,
+                    };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Search Artists (public)',
+                run: async () => {
+                    const r = await api('GET', `/music/search?q=${encodeSegment('Daft Punk')}&type=artist`, null, false);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Artist search failed'));
+                    const artists = Array.isArray(r.data.data) ? r.data.data : [];
+                    return { count: artists.length };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Search Albums (public)',
+                run: async () => {
+                    const r = await api('GET', `/music/search?q=${encodeSegment('Daft Punk')}&type=album`, null, false);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Album search failed'));
+                    const albums = Array.isArray(r.data.data) ? r.data.data : [];
+                    return { count: albums.length };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Track Details',
+                run: async () => {
+                    const trackId = ensureValue(musicProbe.trackId, 'Track ID not available from Search Tracks');
+                    const r = await api('GET', `/music/track/${trackId}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get track details failed'));
+                    return { id: r.data.id, title: r.data.title };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Album Details',
+                run: async () => {
+                    const albumId = ensureValue(musicProbe.albumId, 'Album ID not available from Search Tracks');
+                    const r = await api('GET', `/music/album/${albumId}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get album details failed'));
+                    return { id: r.data.id, title: r.data.title };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Artist Details',
+                run: async () => {
+                    const artistId = ensureValue(musicProbe.artistId, 'Artist ID not available from Search Tracks');
+                    const r = await api('GET', `/music/artist/${artistId}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get artist details failed'));
+                    return { id: r.data.id, name: r.data.name };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Artist Top Tracks',
+                run: async () => {
+                    const artistId = ensureValue(musicProbe.artistId, 'Artist ID not available from Search Tracks');
+                    const r = await api('GET', `/music/artist/${artistId}/top`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get artist top tracks failed'));
+                    const tracks = Array.isArray(r.data.data) ? r.data.data : [];
+                    return { count: tracks.length };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Charts',
+                run: async () => {
+                    const r = await api('GET', '/music/charts');
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Get charts failed'));
+                    const tracks = Array.isArray(r.data.data) ? r.data.data : [];
+                    return { count: tracks.length };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Lookup MusicBrainz MBID',
+                run: async () => {
+                    const artistName = ensureValue(musicProbe.artistName, 'Artist name not available from Search Tracks');
+                    const trackTitle = ensureValue(musicProbe.trackTitle, 'Track title not available from Search Tracks');
+
+                    const r = await api(
+                        'GET',
+                        `/music/mbid?artist=${encodeSegment(artistName)}&title=${encodeSegment(trackTitle)}`
+                    );
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'MBID lookup failed'));
+
+                    musicProbe.recordingMbid = r.data.recording_mbid || null;
+                    musicProbe.releaseMbid = r.data.release_mbid || null;
+                    return {
+                        recordingMbid: musicProbe.recordingMbid,
+                        releaseMbid: musicProbe.releaseMbid,
+                    };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Cover Art',
+                run: async () => {
+                    const releaseMbid = ensureValue(musicProbe.releaseMbid, 'No release MBID available for cover art lookup');
+                    const r = await api('GET', `/music/coverart?mbid=${encodeSegment(releaseMbid)}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Cover art lookup failed'));
+                    return { coverUrl: r.data || null };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get TheAudioDB Artist',
+                run: async () => {
+                    const artistName = musicProbe.artistName || 'Adele';
+                    const r = await api('GET', `/music/tadb/artist?name=${encodeSegment(artistName)}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'TheAudioDB artist lookup failed'));
+
+                    if (r.data && r.data.data === null) {
+                        return { found: false };
+                    }
+
+                    musicProbe.tadbArtistMbid = r.data.strArtistMBID || null;
+                    return { found: true, artist: r.data.name || artistName };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get TheAudioDB Discography',
+                run: async () => {
+                    const artistName = musicProbe.artistName || 'Adele';
+                    const r = await api('GET', `/music/tadb/discography?id=${encodeSegment(artistName)}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'TheAudioDB discography lookup failed'));
+                    const items = Array.isArray(r.data.data) ? r.data.data : [];
+                    return { count: items.length };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get TheAudioDB Album by MBID',
+                run: async () => {
+                    const mbid = musicProbe.releaseMbid || musicProbe.tadbArtistMbid;
+                    ensureValue(mbid, 'No MBID available for TheAudioDB album lookup');
+
+                    const r = await api('GET', `/music/tadb/album?id=${encodeSegment(mbid)}`);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'TheAudioDB album lookup failed'));
+
+                    if (r.data && r.data.data === null) {
+                        return { found: false };
+                    }
+
+                    return { found: true, album: r.data.strAlbum || null };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Last.fm Artist Info',
+                run: async () => {
+                    const artistName = ensureValue(musicProbe.artistName, 'Artist name not available from Search Tracks');
+                    const r = await api('GET', `/music/artist/${encodeSegment(artistName)}/info`);
+                    skipIfLastFmNotConfigured(r);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Last.fm artist info failed'));
+                    return { name: r.data.name, listeners: r.data.listeners };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Last.fm Similar Artists',
+                run: async () => {
+                    const artistName = ensureValue(musicProbe.artistName, 'Artist name not available from Search Tracks');
+                    const r = await api('GET', `/music/artist/${encodeSegment(artistName)}/similar`);
+                    skipIfLastFmNotConfigured(r);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Last.fm similar artists failed'));
+                    const items = Array.isArray(r.data.data) ? r.data.data : [];
+                    return { count: items.length };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Last.fm Track Info',
+                run: async () => {
+                    const artistName = ensureValue(musicProbe.artistName, 'Artist name not available from Search Tracks');
+                    const trackTitle = ensureValue(musicProbe.trackTitle, 'Track title not available from Search Tracks');
+                    const r = await api(
+                        'GET',
+                        `/music/track/${encodeSegment(artistName)}/${encodeSegment(trackTitle)}/info`
+                    );
+
+                    skipIfLastFmNotConfigured(r);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Last.fm track info failed'));
+                    return { name: r.data.name, artist: r.data.artist };
+                }
+            },
+            {
+                group: 'Music Sources',
+                name: 'Get Lyrics',
+                run: async () => {
+                    const artistName = ensureValue(musicProbe.artistName, 'Artist name not available from Search Tracks');
+                    const trackTitle = ensureValue(musicProbe.trackTitle, 'Track title not available from Search Tracks');
+                    const r = await api(
+                        'GET',
+                        `/music/lyrics?artist=${encodeSegment(artistName)}&title=${encodeSegment(trackTitle)}`
+                    );
+
+                    if (r.status === 404) {
+                        return { lyricsFound: false };
+                    }
+
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Lyrics lookup failed'));
+                    const lyrics = typeof r.data.lyrics === 'string' ? r.data.lyrics : '';
+                    return { lyricsFound: !!lyrics, length: lyrics.length };
+                }
+            },
+
+            // Cleanup endpoints
             {
                 group: 'Cleanup',
                 name: 'Delete Test Playlist',
                 run: async () => {
-                    const r = await api('DELETE', '/playlists/' + testPlaylistId);
-                    if (!r.ok) throw new Error(r.data.message || 'Delete playlist failed');
+                    const playlistId = ensureValue(testPlaylistId, 'No test playlist to delete');
+                    const r = await api('DELETE', '/playlists/' + playlistId);
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Delete playlist failed'));
                     return { success: true };
                 }
-            }
+            },
+            {
+                group: 'Cleanup',
+                name: 'Logout',
+                run: async () => {
+                    ensureValue(accessToken, 'No access token available for logout');
+                    const r = await api('POST', '/auth/logout');
+                    if (!r.ok) throw new Error(getErrorMessage(r, 'Logout failed'));
+                    accessToken = null;
+                    refreshToken = null;
+                    return { success: true };
+                }
+            },
         ];
         
         function renderResults() {
@@ -457,18 +871,20 @@ TEST_PAGE_HTML = '''
             let html = '';
             for (const [groupName, groupTests] of Object.entries(groups)) {
                 const passed = groupTests.filter(t => t.result?.status === 'pass').length;
+                const skipped = groupTests.filter(t => t.result?.status === 'skip').length;
                 const total = groupTests.length;
                 
                 html += `<div class="test-group">
                     <div class="test-group-header">
                         <span>${groupName}</span>
-                        <span>${passed}/${total}</span>
+                        <span>${passed} pass, ${skipped} skip, ${total} total</span>
                     </div>`;
                     
                 for (const test of groupTests) {
                     const r = test.result || { status: 'pending' };
                     const badge = r.status === 'pass' ? 'pass' : 
                                   r.status === 'fail' ? 'fail' :
+                                  r.status === 'skip' ? 'skip' :
                                   r.status === 'running' ? 'running' : 'pending';
                     
                     html += `<div class="test-item">
@@ -488,11 +904,13 @@ TEST_PAGE_HTML = '''
         function updateSummary() {
             const passed = testResults.filter(r => r?.status === 'pass').length;
             const failed = testResults.filter(r => r?.status === 'fail').length;
+            const skipped = testResults.filter(r => r?.status === 'skip').length;
             
             document.getElementById('summary').style.display = 'flex';
             document.getElementById('totalTests').textContent = tests.length;
             document.getElementById('passedTests').textContent = passed;
             document.getElementById('failedTests').textContent = failed;
+            document.getElementById('skippedTests').textContent = skipped;
         }
         
         async function runAllTests() {
@@ -526,11 +944,19 @@ TEST_PAGE_HTML = '''
                     };
                     log(`✓ PASS: ${test.name}`, 'success');
                 } catch (err) {
-                    testResults[i] = { 
-                        status: 'fail', 
-                        details: err.message 
-                    };
-                    log(`✗ FAIL: ${test.name} - ${err.message}`, 'error');
+                    if (err?.isSkip) {
+                        testResults[i] = {
+                            status: 'skip',
+                            details: err.message,
+                        };
+                        log(`↷ SKIP: ${test.name} - ${err.message}`, 'info');
+                    } else {
+                        testResults[i] = {
+                            status: 'fail',
+                            details: err.message,
+                        };
+                        log(`✗ FAIL: ${test.name} - ${err.message}`, 'error');
+                    }
                 }
                 
                 renderResults();
@@ -542,13 +968,17 @@ TEST_PAGE_HTML = '''
             
             const passed = testResults.filter(r => r?.status === 'pass').length;
             const failed = testResults.filter(r => r?.status === 'fail').length;
+            const skipped = testResults.filter(r => r?.status === 'skip').length;
             
-            if (failed === 0) {
+            if (failed === 0 && skipped === 0) {
                 updateStatus(`All ${passed} tests passed!`, 'success');
-                log(`\\n✓ All ${passed} tests passed in ${duration}s`, 'success');
+                log(`\n✓ All ${passed} tests passed in ${duration}s`, 'success');
+            } else if (failed === 0) {
+                updateStatus(`${passed} passed, ${skipped} skipped`, 'success');
+                log(`\n✓ ${passed} passed, ${skipped} skipped in ${duration}s`, 'success');
             } else {
-                updateStatus(`${failed} test(s) failed`, 'failed');
-                log(`\\n✗ ${failed} test(s) failed, ${passed} passed in ${duration}s`, 'error');
+                updateStatus(`${failed} failed, ${passed} passed`, 'failed');
+                log(`\n✗ ${failed} failed, ${passed} passed, ${skipped} skipped in ${duration}s`, 'error');
             }
             
             btn.disabled = false;
