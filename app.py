@@ -260,6 +260,25 @@ TEST_PAGE_HTML = '''
                 throw createSkip(message);
             }
         }
+
+        function skipIfExternalBlocked(response, sourceName) {
+            if (!response || response.status !== 502) {
+                return;
+            }
+
+            const message = getErrorMessage(response, `${sourceName} request failed`);
+            const blockedPatterns = [
+                'Unable to connect to proxy',
+                'Tunnel connection failed: 403 Forbidden',
+                'ProxyError',
+                'Max retries exceeded',
+            ];
+
+            const isBlocked = blockedPatterns.some((pattern) => message.includes(pattern));
+            if (isBlocked) {
+                throw createSkip(`${sourceName} is blocked by host network/proxy restrictions`);
+            }
+        }
         
         async function api(method, endpoint, data = null, auth = true) {
             const headers = { 'Content-Type': 'application/json' };
@@ -736,6 +755,7 @@ TEST_PAGE_HTML = '''
                 run: async () => {
                     const artistName = musicProbe.artistName || 'Adele';
                     const r = await api('GET', `/music/tadb/artist?name=${encodeSegment(artistName)}`);
+                    skipIfExternalBlocked(r, 'TheAudioDB');
                     if (!r.ok) throw new Error(getErrorMessage(r, 'TheAudioDB artist lookup failed'));
 
                     if (r.data && r.data.data === null) {
@@ -752,6 +772,7 @@ TEST_PAGE_HTML = '''
                 run: async () => {
                     const artistName = musicProbe.artistName || 'Adele';
                     const r = await api('GET', `/music/tadb/discography?id=${encodeSegment(artistName)}`);
+                    skipIfExternalBlocked(r, 'TheAudioDB');
                     if (!r.ok) throw new Error(getErrorMessage(r, 'TheAudioDB discography lookup failed'));
                     const items = Array.isArray(r.data.data) ? r.data.data : [];
                     return { count: items.length };
@@ -765,6 +786,7 @@ TEST_PAGE_HTML = '''
                     ensureValue(mbid, 'No MBID available for TheAudioDB album lookup');
 
                     const r = await api('GET', `/music/tadb/album?id=${encodeSegment(mbid)}`);
+                    skipIfExternalBlocked(r, 'TheAudioDB');
                     if (!r.ok) throw new Error(getErrorMessage(r, 'TheAudioDB album lookup failed'));
 
                     if (r.data && r.data.data === null) {
