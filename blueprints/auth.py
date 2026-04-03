@@ -13,6 +13,14 @@ from utils import error_response
 auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
 
+def _clean_text(value):
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
 @auth_bp.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
@@ -20,9 +28,9 @@ def register():
     if not data:
         return error_response('No data provided', 400)
     
-    email = data.get('email', '').strip().lower()
+    email = _clean_text(data.get('email')).lower()
     password = data.get('password', '')
-    username = data.get('username', '').strip() or None
+    username = _clean_text(data.get('username')) or None
     
     if not email or not password:
         return error_response('Email and password are required', 400)
@@ -64,7 +72,7 @@ def login():
     if not data:
         return error_response('No data provided', 400)
     
-    email = data.get('email', '').strip().lower()
+    email = _clean_text(data.get('email')).lower()
     password = data.get('password', '')
     
     if not email or not password:
@@ -133,13 +141,16 @@ def logout():
 def update_profile():
     current_user_id = get_jwt_identity()
     data = request.get_json()
+
+    if not data:
+        return error_response('No data provided', 400)
     
     user = User.query.get(current_user_id)
     if not user:
         return error_response('User not found', 404)
     
     if 'username' in data:
-        user.username = data['username'].strip() or None
+        user.username = _clean_text(data.get('username')) or None
     
     if 'avatar_url' in data:
         user.avatar_url = data['avatar_url']

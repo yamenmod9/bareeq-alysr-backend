@@ -10,6 +10,14 @@ from utils import error_response
 playlists_bp = Blueprint('playlists', __name__, url_prefix='/api/playlists')
 
 
+def _clean_text(value):
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return ''
+    return str(value).strip()
+
+
 @playlists_bp.route('', methods=['GET'])
 @jwt_required()
 def get_playlists():
@@ -46,15 +54,17 @@ def create_playlist():
     if not data:
         return error_response('No data provided', 400)
     
-    name = data.get('name', '').strip()
+    name = _clean_text(data.get('name'))
     if not name:
         return error_response('Playlist name is required', 400)
+
+    description = _clean_text(data.get('description')) or None
     
     playlist = Playlist(
         id=str(uuid.uuid4()),
         user_id=current_user_id,
         name=name,
-        description=data.get('description', '').strip() or None,
+        description=description,
         cover_art=data.get('cover_art'),
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow()
@@ -71,6 +81,9 @@ def create_playlist():
 def update_playlist(playlist_id):
     current_user_id = get_jwt_identity()
     data = request.get_json()
+
+    if not data:
+        return error_response('No data provided', 400)
     
     playlist = Playlist.query.filter_by(
         id=playlist_id,
@@ -81,12 +94,12 @@ def update_playlist(playlist_id):
         return error_response('Playlist not found', 404)
     
     if 'name' in data:
-        name = data['name'].strip()
+        name = _clean_text(data.get('name'))
         if name:
             playlist.name = name
     
     if 'description' in data:
-        playlist.description = data['description'].strip() or None
+        playlist.description = _clean_text(data.get('description')) or None
     
     if 'cover_art' in data:
         playlist.cover_art = data['cover_art']
